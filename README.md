@@ -1,8 +1,22 @@
 # InferAll
 
-Personal inference engine for HuggingFace models. One unified API for chat, embeddings, vision, speech, video, translation, classification, and more.
+**Run any AI model locally — one unified API for chat, vision, speech, images, video, and more. Built for multi-user serving.**
 
-**Why?** Ollama is great but limited to text generation. InferAll handles every HuggingFace model type through a single OpenAI-compatible API — LLMs, embeddings, reranking, image generation, speech recognition, TTS, video, translation, object detection, segmentation, depth estimation, and document QA.
+InferAll is a self-hosted inference server that exposes an **OpenAI-compatible REST API** for every type of AI model. Point any OpenAI SDK client, LangChain, LlamaIndex, or custom application at InferAll and it just works — no code changes needed.
+
+### What it does
+
+- **One API for everything** — 17 model types through standard OpenAI endpoints (`/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`, and 50+ more)
+- **Runs as a server** — start it with `inferall serve` and any client on your network can connect
+- **Multi-user ready** — per-API-key rate limiting, priority levels, and per-model request queuing so one user's request never blocks another's
+- **Pull from anywhere** — models from HuggingFace Hub, Ollama registry, or Ollama cloud, all through one CLI
+- **GPU optimized** — multi-GPU scheduling, VRAM-aware allocation, GGUF at full speed (113 tok/s on RTX 4090), plus fp16/GPTQ/AWQ/BNB quantization
+- **Production features** — Assistants API with threads and runs, Files API, Batch processing, Fine-tuning API, tool/function calling, structured JSON output
+- **Built-in dashboard** — terminal UI for real-time GPU monitoring, request queues, performance metrics, and model management
+
+### Supported model types
+
+Chat/LLM · Embeddings · Reranking · Vision-Language · Speech Recognition · Text-to-Speech · Image Generation · Image-to-Image · Video Generation · Translation · Summarization · Classification · Object Detection · Segmentation · Depth Estimation · Document QA · Audio Processing
 
 ## Requirements
 
@@ -15,7 +29,7 @@ Personal inference engine for HuggingFace models. One unified API for chat, embe
 ### 1. Clone and create virtual environment
 
 ```bash
-git clone <repo-url> inferall
+git clone https://github.com/GravenSm/inferall.git
 cd inferall
 python3 -m venv .venv
 source .venv/bin/activate
