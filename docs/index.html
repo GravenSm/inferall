@@ -195,6 +195,34 @@
             color: var(--text-dim);
         }
 
+        /* Screenshots */
+        .screenshots {
+            padding: 60px 0;
+        }
+        .screenshots h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 40px;
+        }
+        .screenshot-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 32px;
+        }
+        .screenshot {
+            text-align: center;
+        }
+        .screenshot img {
+            max-width: 100%;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+        }
+        .screenshot p {
+            color: var(--text-dim);
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
         /* Footer */
         footer {
             border-top: 1px solid var(--border);
@@ -295,6 +323,34 @@
 <span class="cmd">curl</span> http://localhost:8000/v1/chat/completions \
   -H <span class="flag">"Content-Type: application/json"</span> \
   -d <span class="flag">'{"model": "llama3.1", "messages": [{"role": "user", "content": "Hello!"}]}'</span></pre>
+        </div>
+    </section>
+
+    <section class="screenshots">
+        <div class="container">
+            <h2>See It in Action</h2>
+            <div class="screenshot-grid">
+                <div class="screenshot">
+                    <img src="screenshots/pull.svg" alt="Pulling models from HuggingFace and Ollama">
+                    <p>Pull models from HuggingFace or Ollama with one command</p>
+                </div>
+                <div class="screenshot">
+                    <img src="screenshots/model-list.svg" alt="Model list showing all pulled models">
+                    <p>Every model type in one place — chat, embeddings, vision, speech, and more</p>
+                </div>
+                <div class="screenshot">
+                    <img src="screenshots/server.svg" alt="API server running">
+                    <p>Start the server and connect any OpenAI-compatible client</p>
+                </div>
+                <div class="screenshot">
+                    <img src="screenshots/concurrency.svg" alt="Multi-user concurrent serving">
+                    <p>Multiple models and users served concurrently — no blocking</p>
+                </div>
+                <div class="screenshot">
+                    <img src="screenshots/gpu-status.svg" alt="GPU monitoring">
+                    <p>Real-time GPU monitoring with VRAM tracking and model allocation</p>
+                </div>
+            </div>
         </div>
     </section>
 
