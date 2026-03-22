@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InferAll — Run any AI model locally</title>
+    <meta name="description" content="Universal inference engine for every AI model type. One unified API for chat, vision, speech, images, video, translation, and beyond. Built for multi-user serving.">
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --surface: #141414;
+            --border: #2a2a2a;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --accent: #6c63ff;
+            --accent-glow: rgba(108, 99, 255, 0.15);
+            --green: #4ade80;
+            --code-bg: #1a1a2e;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Nav */
+        nav {
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        nav .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        nav .logo {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--accent);
+            text-decoration: none;
+        }
+        nav .links a {
+            color: var(--text-dim);
+            text-decoration: none;
+            margin-left: 28px;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+        }
+        nav .links a:hover { color: var(--text); }
+
+        /* Hero */
+        .hero {
+            text-align: center;
+            padding: 80px 0 60px;
+        }
+        .hero h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, var(--accent), #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .hero .tagline {
+            font-size: 1.25rem;
+            color: var(--text-dim);
+            max-width: 620px;
+            margin: 0 auto 40px;
+        }
+        .hero .install {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 28px;
+            display: inline-block;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 1rem;
+            color: var(--green);
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .hero .install:hover {
+            border-color: var(--accent);
+        }
+        .hero .install span { color: var(--text-dim); }
+
+        /* Buttons */
+        .buttons {
+            margin-top: 32px;
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 12px 28px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+        .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn-secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+        .btn-secondary:hover { border-color: var(--accent); }
+
+        /* Features */
+        .features {
+            padding: 60px 0;
+        }
+        .features h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 48px;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+        }
+        .feature {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            transition: border-color 0.2s;
+        }
+        .feature:hover { border-color: var(--accent); }
+        .feature .icon { font-size: 1.6rem; margin-bottom: 12px; }
+        .feature h3 { font-size: 1.1rem; margin-bottom: 8px; }
+        .feature p { color: var(--text-dim); font-size: 0.9rem; }
+
+        /* Code Example */
+        .example {
+            padding: 60px 0;
+        }
+        .example h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 32px;
+        }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            overflow-x: auto;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+        pre .comment { color: #666; }
+        pre .cmd { color: var(--green); }
+        pre .flag { color: var(--accent); }
+
+        /* Models table */
+        .models {
+            padding: 40px 0;
+        }
+        .models h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 32px;
+        }
+        .model-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+        }
+        .tag {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 6px 16px;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 32px 0;
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+        footer a { color: var(--accent); text-decoration: none; }
+
+        @media (max-width: 600px) {
+            .hero h1 { font-size: 2rem; }
+            .hero .tagline { font-size: 1rem; }
+            .hero .install { font-size: 0.85rem; padding: 12px 20px; }
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <a href="/" class="logo">InferAll</a>
+            <div class="links">
+                <a href="https://github.com/GravenSm/inferall">GitHub</a>
+                <a href="https://github.com/GravenSm/inferall#installation">Docs</a>
+                <a href="https://github.com/GravenSm/inferall#api-reference">API</a>
+            </div>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="container">
+            <h1>InferAll</h1>
+            <p class="tagline">
+                Run any AI model locally — one unified API for chat, vision, speech, images, video, and more. Built for multi-user serving.
+            </p>
+            <div class="install" onclick="navigator.clipboard.writeText('pip install inferall')">
+                <span>$</span> pip install inferall
+            </div>
+            <div class="buttons">
+                <a href="https://github.com/GravenSm/inferall" class="btn btn-primary">View on GitHub</a>
+                <a href="https://github.com/GravenSm/inferall#quick-start" class="btn btn-secondary">Quick Start →</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="features">
+        <div class="container">
+            <h2>Why InferAll?</h2>
+            <div class="feature-grid">
+                <div class="feature">
+                    <div class="icon">🔌</div>
+                    <h3>OpenAI-Compatible API</h3>
+                    <p>Drop-in replacement for the OpenAI API. Works with LangChain, LlamaIndex, and any OpenAI SDK client out of the box.</p>
+                </div>
+                <div class="feature">
+                    <div class="icon">🎯</div>
+                    <h3>Every Model Type</h3>
+                    <p>17 task types — chat, embeddings, reranking, vision, ASR, TTS, image generation, video, translation, classification, object detection, and more.</p>
+                </div>
+                <div class="feature">
+                    <div class="icon">⚡</div>
+                    <h3>Multi-User Ready</h3>
+                    <p>Per-model request queuing, API key management with rate limiting, and priority levels. Model A never blocks Model B.</p>
+                </div>
+                <div class="feature">
+                    <div class="icon">🔄</div>
+                    <h3>Pull from Anywhere</h3>
+                    <p>Pull models from HuggingFace Hub, Ollama registry, or use Ollama cloud models — all through one CLI.</p>
+                </div>
+                <div class="feature">
+                    <div class="icon">🖥️</div>
+                    <h3>GPU Optimized</h3>
+                    <p>Multi-GPU scheduling, VRAM-aware allocation, GGUF support at full speed (113 tok/s on RTX 4090), and fp16/GPTQ/AWQ/BNB quantization.</p>
+                </div>
+                <div class="feature">
+                    <div class="icon">📊</div>
+                    <h3>Built-in Dashboard</h3>
+                    <p>Terminal UI for real-time monitoring — GPU utilization, request queues, performance metrics, model management, all at a glance.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="example">
+        <div class="container">
+            <h2>Get Started in 3 Commands</h2>
+            <pre><span class="comment"># Install</span>
+<span class="cmd">pip install inferall</span>
+
+<span class="comment"># Pull a model</span>
+<span class="cmd">inferall pull</span> <span class="flag">llama3.1</span>          <span class="comment"># from Ollama</span>
+<span class="cmd">inferall pull</span> <span class="flag">Qwen/Qwen2.5-7B-Instruct</span>  <span class="comment"># from HuggingFace</span>
+
+<span class="comment"># Start serving</span>
+<span class="cmd">inferall serve</span>
+
+<span class="comment"># That's it — OpenAI-compatible API at http://localhost:8000</span>
+<span class="cmd">curl</span> http://localhost:8000/v1/chat/completions \
+  -H <span class="flag">"Content-Type: application/json"</span> \
+  -d <span class="flag">'{"model": "llama3.1", "messages": [{"role": "user", "content": "Hello!"}]}'</span></pre>
+        </div>
+    </section>
+
+    <section class="models">
+        <div class="container">
+            <h2>Supported Model Types</h2>
+            <div class="model-tags">
+                <span class="tag">Chat / LLM</span>
+                <span class="tag">Embeddings</span>
+                <span class="tag">Reranking</span>
+                <span class="tag">Vision-Language</span>
+                <span class="tag">Speech Recognition</span>
+                <span class="tag">Text-to-Speech</span>
+                <span class="tag">Image Generation</span>
+                <span class="tag">Image-to-Image</span>
+                <span class="tag">Video Generation</span>
+                <span class="tag">Translation</span>
+                <span class="tag">Summarization</span>
+                <span class="tag">Classification</span>
+                <span class="tag">Object Detection</span>
+                <span class="tag">Segmentation</span>
+                <span class="tag">Depth Estimation</span>
+                <span class="tag">Document QA</span>
+                <span class="tag">Audio Processing</span>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>
+                InferAll is open source under the MIT License.
+                <br>
+                <a href="https://github.com/GravenSm/inferall">GitHub</a> ·
+                <a href="https://github.com/GravenSm/inferall#installation">Installation</a> ·
+                <a href="https://github.com/GravenSm/inferall#api-reference">API Reference</a>
+            </p>
+        </div>
+    </footer>
+</body>
+</html>

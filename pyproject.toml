@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inferall"
+version = "0.1.0"
+description = "Universal inference engine for every AI model — chat, embeddings, vision, ASR, diffusion, TTS"
+license = "MIT"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.36",
+    "accelerate>=0.25",
+    "huggingface-hub>=0.20",
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "typer>=0.9",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "nvidia-ml-py>=11.5",
+    "python-multipart>=0.0.6",
+    "textual>=0.40",
+]
+
+[project.optional-dependencies]
+gguf = ["llama-cpp-python>=0.2"]
+gptq = ["auto-gptq>=0.6"]
+awq = ["autoawq>=0.1"]
+bnb = ["bitsandbytes>=0.41"]
+embeddings = ["sentence-transformers>=2.2"]
+diffusion = ["diffusers>=0.25", "Pillow>=10.0"]
+asr = ["soundfile>=0.12", "librosa>=0.10"]
+tts = ["scipy>=1.10"]
+multimodal = ["inferall[asr,diffusion,embeddings,tts]"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "httpx>=0.25"]
+all = ["inferall[gguf,gptq,awq,bnb,multimodal,dev]"]
+
+[project.scripts]
+inferall = "inferall.cli.app:main"
+inferall_dashboard = "inferall.tui.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["inferall*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
