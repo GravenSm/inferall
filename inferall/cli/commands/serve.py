@@ -84,6 +84,16 @@ def serve(
     fine_tuning_store = FineTuningStore(registry.conn)
     batch_store = BatchStore(registry.conn)
 
+    # Multi-key auth (if auth.db exists)
+    from inferall.auth.key_store import KeyStore
+    key_store = None
+    auth_db = config.base_dir / "auth.db"
+    if auth_db.exists():
+        key_store = KeyStore(str(auth_db))
+        key_count = len(key_store.list_keys())
+        if key_count > 0:
+            console.print(f"  API Keys: [green]{key_count} configured[/green]")
+
     # Per-model request dispatcher
     model_dispatcher = ModelDispatcher(
         max_workers=config.inference_workers,
@@ -107,6 +117,7 @@ def serve(
         fine_tuning_store=fine_tuning_store,
         batch_store=batch_store,
         dispatcher=model_dispatcher,
+        key_store=key_store,
     )
 
     # Print startup info

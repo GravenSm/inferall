@@ -268,10 +268,14 @@ def execute_fine_tuning_job(job_id: str, store: FineTuningStore) -> None:
             pass
 
 
+_MAX_BATCH_REQUESTS = 10000  # Maximum requests per batch job
+_BATCH_THROTTLE_SECONDS = 0.1  # Pause between requests to avoid monopolizing
+
 def execute_batch(
     batch_id: str, store: BatchStore, file_store, orchestrator, files_dir,
 ) -> None:
     """Execute a batch job — process JSONL input through inference endpoints."""
+    import time as time_mod
     from inferall.backends.base import GenerationParams, EmbeddingParams
 
     try:
@@ -294,6 +298,14 @@ def execute_batch(
 
         lines = input_path.read_text().strip().splitlines()
         total = len(lines)
+
+        # Enforce batch size limit
+        if total > _MAX_BATCH_REQUESTS:
+            store.update_batch_status(batch_id, "failed")
+            logger.error("Batch %s rejected: %d requests exceeds limit of %d",
+                         batch_id, total, _MAX_BATCH_REQUESTS)
+            return
+
         completed = 0
         failed = 0
         output_lines = []
@@ -319,6 +331,9 @@ def execute_batch(
             custom_id = request.get("custom_id", "")
             url = request.get("url", "")
             body = request.get("body", {})
+
+            # Throttle to avoid monopolizing inference workers
+            time_mod.sleep(_BATCH_THROTTLE_SECONDS)
 
             try:
                 response_body = _dispatch_batch_request(url, body, orchestrator)

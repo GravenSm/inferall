@@ -287,8 +287,26 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
             image_bytes = base64.b64decode(data)
             return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        # HTTP URL — use urllib (stdlib) to avoid requests/httpx dep issues
+        # HTTP URL — validate scheme to prevent SSRF
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+
+        # Block private/internal network ranges
+        import socket
+        try:
+            ip = socket.gethostbyname(parsed.hostname)
+            import ipaddress
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
+                raise ValueError(f"URL resolves to private/internal address: {ip}")
+        except (socket.gaierror, ValueError) as e:
+            if "private" in str(e) or "internal" in str(e):
+                raise
+            # If DNS fails, let the request fail naturally below
+
         from urllib.request import urlopen, Request
-        req = Request(url, headers={"User-Agent": "model-engine/0.1"})
+        req = Request(url, headers={"User-Agent": "inferall/0.1"})
         with urlopen(req, timeout=30) as resp:
             return Image.open(io.BytesIO(resp.read())).convert("RGB")

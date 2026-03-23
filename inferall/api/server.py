@@ -326,6 +326,7 @@ def create_app(
     fine_tuning_store=None,
     batch_store=None,
     dispatcher=None,
+    key_store=None,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -361,37 +362,18 @@ def create_app(
     app = FastAPI(title="InferAll", version="0.1.0", lifespan=lifespan)
 
     # ------------------------------------------------------------------
-    # Middleware: API Key Auth
+    # Middleware: API Key Auth (supports multi-key + single-key)
     # ------------------------------------------------------------------
+
+    from inferall.auth.middleware import create_auth_middleware
+    _auth_middleware = create_auth_middleware(
+        key_store=key_store,
+        single_api_key=api_key,
+    )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        if api_key is None:
-            return await call_next(request)
-
-        # Skip auth for health endpoint
-        if request.url.path == "/health":
-            return await call_next(request)
-
-        auth_header = request.headers.get("authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return _error_response(
-                401,
-                "Missing or invalid API key. Provide via: Authorization: Bearer <key>",
-                error_type="authentication_error",
-                code="invalid_api_key",
-            )
-
-        provided_key = auth_header[7:]  # Strip "Bearer "
-        if provided_key != api_key:
-            return _error_response(
-                401,
-                "Invalid API key.",
-                error_type="authentication_error",
-                code="invalid_api_key",
-            )
-
-        return await call_next(request)
+        return await _auth_middleware(request, call_next)
 
     # ------------------------------------------------------------------
     # POST /v1/chat/completions
@@ -1478,7 +1460,15 @@ def create_app(
         from inferall.registry.file_store import validate_file
         import shutil
 
+        # Enforce upload size limit (100MB default)
+        max_upload_bytes = 100 * 1024 * 1024
         content = await file.read()
+        if len(content) > max_upload_bytes:
+            return _error_response(
+                413, f"File too large ({len(content)} bytes). Max: {max_upload_bytes} bytes.",
+                code="file_too_large",
+            )
+
         filename = file.filename or "unknown"
 
         # Validate
@@ -1487,15 +1477,26 @@ def create_app(
             return _error_response(400, error, param="file")
 
         # Generate file ID and save to disk
+        # Sanitize filename — strip path components to prevent traversal
+        safe_filename = Path(filename).name  # strips all directory components
+        safe_filename = safe_filename.replace("..", "").replace("/", "").replace("\\", "")
+        if not safe_filename:
+            safe_filename = "upload"
+
         file_id = f"file-{uuid.uuid4().hex[:24]}"
         file_dir = files_dir / file_id
         file_dir.mkdir(parents=True, exist_ok=True)
-        file_path = file_dir / filename
+        file_path = file_dir / safe_filename
+
+        # Verify the resolved path is inside the expected directory
+        if not str(file_path.resolve()).startswith(str(file_dir.resolve())):
+            return _error_response(400, "Invalid filename.", param="file")
+
         file_path.write_bytes(content)
 
         # Create DB record
         result = file_store.create(
-            filename=filename,
+            filename=safe_filename,
             purpose=purpose,
             size_bytes=len(content),
             local_path=str(file_path),
@@ -1537,11 +1538,16 @@ def create_app(
         if local_path is None:
             return _error_response(404, f"File '{file_id}' not found.", code="file_not_found")
 
-        # Delete from disk
+        # Delete from disk — only if path is inside our files directory
         path = Path(local_path)
-        if path.exists():
-            # Delete the file's directory (file_id dir)
-            shutil.rmtree(path.parent, ignore_errors=True)
+        if path.exists() and files_dir:
+            # Verify the path is inside our files directory before deleting
+            try:
+                path.resolve().relative_to(files_dir.resolve())
+                # Safe — delete the file's directory (file_id dir)
+                shutil.rmtree(path.parent, ignore_errors=True)
+            except ValueError:
+                logger.warning("Refusing to delete file outside files_dir: %s", path)
 
         file_store.delete(file_id)
         return {"id": file_id, "object": "file", "deleted": True}
@@ -1854,6 +1860,13 @@ def create_app(
 
     @app.websocket("/v1/ws/chat")
     async def ws_chat(websocket: WebSocket):
+        # Authenticate WebSocket handshake (HTTP middleware doesn't cover WebSockets)
+        if api_key is not None:
+            # Check query param or first message for auth
+            token = websocket.query_params.get("token", "")
+            if token != api_key:
+                await websocket.close(code=4001, reason="Authentication required. Pass ?token=<api_key>")
+                return
         from inferall.api.websocket import websocket_chat
         await websocket_chat(websocket, orchestrator, dispatcher)
 
