@@ -88,6 +88,13 @@ def create_auth_middleware(
             # Attach key info to request state
             request.state.key_info = key_info
             request.state.priority = key_info.priority
+
+            # Log usage for rate limiting
+            key_store.log_usage(
+                key_hash=key_info.key_hash,
+                endpoint=request.url.path,
+            )
+
             return await call_next(request)
 
         # Single-key auth (backward compatible)

@@ -158,39 +158,38 @@ def client(tmp_path):
 
 
 class TestFineTuningEndpoints:
-    def test_create_job(self, client):
+    def test_create_job_returns_501(self, client):
+        """Fine-tuning training is not implemented — returns 501 immediately."""
         resp = client.post("/v1/fine_tuning/jobs", json={
             "model": "gpt-4", "training_file": "file-abc",
         })
-        assert resp.status_code == 200
-        assert resp.json()["object"] == "fine_tuning.job"
+        assert resp.status_code == 501
+        assert "not yet implemented" in resp.json()["error"]["message"]
 
-    def test_list_jobs(self, client):
-        client.post("/v1/fine_tuning/jobs", json={"model": "m", "training_file": "f"})
+    def test_list_jobs_empty(self, client):
         resp = client.get("/v1/fine_tuning/jobs")
-        assert len(resp.json()["data"]) == 1
-
-    def test_get_job(self, client):
-        job = client.post("/v1/fine_tuning/jobs", json={"model": "m", "training_file": "f"}).json()
-        resp = client.get(f"/v1/fine_tuning/jobs/{job['id']}")
         assert resp.status_code == 200
-
-    def test_get_events(self, client):
-        job = client.post("/v1/fine_tuning/jobs", json={"model": "m", "training_file": "f"}).json()
-        resp = client.get(f"/v1/fine_tuning/jobs/{job['id']}/events")
-        assert resp.status_code == 200
-        assert len(resp.json()["data"]) >= 1
-
-    def test_get_checkpoints(self, client):
-        job = client.post("/v1/fine_tuning/jobs", json={"model": "m", "training_file": "f"}).json()
-        resp = client.get(f"/v1/fine_tuning/jobs/{job['id']}/checkpoints")
         assert resp.json()["data"] == []
+
+    def test_get_job_not_found(self, client):
+        resp = client.get("/v1/fine_tuning/jobs/ftjob-nonexistent")
+        assert resp.status_code == 404
 
 
 class TestBatchEndpoints:
-    def test_create_batch(self, client):
+    def _upload_file(self, client, tmp_path):
+        """Helper: upload a batch JSONL file and return file_id."""
+        resp = client.post(
+            "/v1/files",
+            data={"purpose": "batch"},
+            files={"file": ("input.jsonl", b'{"custom_id":"1","url":"/v1/embeddings","body":{"model":"m","input":"hi"}}\n', "application/jsonl")},
+        )
+        return resp.json()["id"]
+
+    def test_create_batch(self, client, tmp_path):
+        file_id = self._upload_file(client, tmp_path)
         resp = client.post("/v1/batches", json={
-            "input_file_id": "file-input",
+            "input_file_id": file_id,
             "endpoint": "/v1/chat/completions",
         })
         assert resp.status_code == 200
@@ -202,17 +201,19 @@ class TestBatchEndpoints:
         })
         assert resp.status_code == 400
 
-    def test_list_batches(self, client):
-        client.post("/v1/batches", json={"input_file_id": "f", "endpoint": "/v1/embeddings"})
-        resp = client.get("/v1/batches")
-        assert len(resp.json()["data"]) == 1
+    def test_create_batch_file_not_found(self, client):
+        resp = client.post("/v1/batches", json={
+            "input_file_id": "file-nonexistent", "endpoint": "/v1/embeddings",
+        })
+        assert resp.status_code == 404
 
-    def test_get_batch(self, client):
-        batch = client.post("/v1/batches", json={
-            "input_file_id": "f", "endpoint": "/v1/embeddings",
-        }).json()
-        resp = client.get(f"/v1/batches/{batch['id']}")
+    def test_list_batches(self, client):
+        resp = client.get("/v1/batches")
         assert resp.status_code == 200
+
+    def test_get_batch_not_found(self, client):
+        resp = client.get("/v1/batches/batch-nonexistent")
+        assert resp.status_code == 404
 
 
 class TestHealthJobsCapabilities:

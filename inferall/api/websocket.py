@@ -26,13 +26,15 @@ async def websocket_chat(
     websocket: WebSocket,
     orchestrator,
     dispatcher,
+    _pre_accepted: bool = False,
 ):
     """
     Handle a WebSocket chat connection.
 
     Supports multiple request/response cycles on the same connection.
     """
-    await websocket.accept()
+    if not _pre_accepted:
+        await websocket.accept()
     logger.info("WebSocket connection opened")
 
     try:

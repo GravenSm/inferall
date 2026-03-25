@@ -286,6 +286,22 @@ class TTSRequest(BaseModel):
 
 
 # =============================================================================
+# Upload Helpers
+# =============================================================================
+
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB default limit for all uploads
+
+async def _read_upload(file, max_bytes: int = _MAX_UPLOAD_BYTES):
+    """Read an uploaded file with size limit. Raises ValueError if too large."""
+    content = await file.read()
+    if len(content) > max_bytes:
+        raise ValueError(
+            f"Upload too large ({len(content)} bytes). Max: {max_bytes} bytes."
+        )
+    return content
+
+
+# =============================================================================
 # Error Helpers
 # =============================================================================
 
@@ -448,10 +464,12 @@ def create_app(
             )
 
         # Non-streaming: use per-model dispatcher
+        priority = getattr(getattr(request, 'state', None), 'priority', 0) if hasattr(request, 'state') else 0
         try:
             result = await dispatcher.submit(
                 request.model, orchestrator.generate,
                 request.model, messages, params,
+                priority=priority,
             )
         except ModelNotFoundError as e:
             return _error_response(404, str(e), param="model", code="model_not_found")
@@ -641,7 +659,10 @@ def create_app(
         from inferall.backends.base import Img2ImgParams
         import base64 as b64_mod
 
-        image_bytes = await image.read()
+        try:
+            image_bytes = await _read_upload(image)
+        except ValueError as e:
+            return _error_response(413, str(e), code="file_too_large")
         image_b64 = b64_mod.b64encode(image_bytes).decode()
 
         params = Img2ImgParams(
@@ -743,7 +764,10 @@ def create_app(
         model: str = Form(...),
         language: Optional[str] = Form(None),
     ):
-        audio_bytes = await file.read()
+        try:
+            audio_bytes = await _read_upload(file)
+        except ValueError as e:
+            return _error_response(413, str(e), code="file_too_large")
 
         params = TranscriptionParams(language=language)
 
@@ -794,7 +818,10 @@ def create_app(
         file: UploadFile = File(...),
         model: str = Form(...),
     ):
-        audio_bytes = await file.read()
+        try:
+            audio_bytes = await _read_upload(file)
+        except ValueError as e:
+            return _error_response(413, str(e), code="file_too_large")
 
         params = TranscriptionParams(task="translate")
 
@@ -1460,14 +1487,10 @@ def create_app(
         from inferall.registry.file_store import validate_file
         import shutil
 
-        # Enforce upload size limit (100MB default)
-        max_upload_bytes = 100 * 1024 * 1024
-        content = await file.read()
-        if len(content) > max_upload_bytes:
-            return _error_response(
-                413, f"File too large ({len(content)} bytes). Max: {max_upload_bytes} bytes.",
-                code="file_too_large",
-            )
+        try:
+            content = await _read_upload(file)
+        except ValueError as e:
+            return _error_response(413, str(e), code="file_too_large")
 
         filename = file.filename or "unknown"
 
@@ -1727,13 +1750,15 @@ def create_app(
     async def create_fine_tuning_job(request: CreateFineTuningJobRequest):
         if fine_tuning_store is None:
             return _error_response(501, "Fine-tuning API not configured.", code="not_configured")
-        job = fine_tuning_store.create_job(
-            model=request.model, training_file=request.training_file,
-            validation_file=request.validation_file, hyperparameters=request.hyperparameters,
+
+        # Training backend is not yet implemented — fail fast with clear message
+        return _error_response(
+            501,
+            "Fine-tuning training is not yet implemented. "
+            "The API structure is ready for when LoRA/QLoRA + PEFT training is added. "
+            "Use the HuggingFace transformers training API directly for now.",
+            code="not_implemented",
         )
-        from inferall.registry.jobs_store import execute_fine_tuning_job
-        inference_pool.submit(execute_fine_tuning_job, job["id"], fine_tuning_store)
-        return JSONResponse(content=job)
 
     @app.get("/v1/fine_tuning/jobs")
     async def list_fine_tuning_jobs(limit: int = 20, after: Optional[str] = None):
@@ -1781,6 +1806,20 @@ def create_app(
             return _error_response(400,
                 f"Unsupported endpoint '{request.endpoint}'. Supported: {', '.join(sorted(_SUPPORTED_BATCH_ENDPOINTS))}",
                 param="endpoint")
+
+        # Validate input file exists
+        if file_store is not None:
+            f = file_store.get(request.input_file_id)
+            if f is None:
+                return _error_response(404,
+                    f"Input file '{request.input_file_id}' not found. Upload it first via POST /v1/files.",
+                    param="input_file_id", code="file_not_found")
+            local = file_store.get_local_path(request.input_file_id)
+            if local is None or not Path(local).exists():
+                return _error_response(404,
+                    f"Input file '{request.input_file_id}' content not found on disk.",
+                    param="input_file_id", code="file_not_found")
+
         batch = batch_store.create_batch(
             input_file_id=request.input_file_id, endpoint=request.endpoint,
             completion_window=request.completion_window, metadata=request.metadata,
@@ -1860,15 +1899,53 @@ def create_app(
 
     @app.websocket("/v1/ws/chat")
     async def ws_chat(websocket: WebSocket):
-        # Authenticate WebSocket handshake (HTTP middleware doesn't cover WebSockets)
-        if api_key is not None:
-            # Check query param or first message for auth
-            token = websocket.query_params.get("token", "")
-            if token != api_key:
-                await websocket.close(code=4001, reason="Authentication required. Pass ?token=<api_key>")
+        # Authenticate WebSocket via first message (not query string — avoids proxy logging)
+        # Supports both multi-key (key_store) and single-key (api_key) modes
+        needs_auth = api_key is not None or key_store is not None
+        if needs_auth:
+            await websocket.accept()
+            try:
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            except (asyncio.TimeoutError, Exception):
+                await websocket.close(code=4001, reason="Auth timeout")
                 return
-        from inferall.api.websocket import websocket_chat
-        await websocket_chat(websocket, orchestrator, dispatcher)
+
+            import json as _json
+            try:
+                auth_msg = _json.loads(raw)
+            except _json.JSONDecodeError:
+                await websocket.close(code=4001, reason="Invalid auth message")
+                return
+
+            if auth_msg.get("type") != "auth" or not auth_msg.get("token"):
+                await websocket.send_json({"type": "error", "message": "First message must be: {\"type\": \"auth\", \"token\": \"<key>\"}"})
+                await websocket.close(code=4001, reason="Auth required")
+                return
+
+            token = auth_msg["token"]
+            authenticated = False
+
+            # Check multi-key store first
+            if key_store is not None:
+                key_info = key_store.validate_key(token)
+                if key_info is not None:
+                    authenticated = True
+
+            # Fall back to single key
+            if not authenticated and api_key is not None and token == api_key:
+                authenticated = True
+
+            if not authenticated:
+                await websocket.send_json({"type": "error", "message": "Invalid API key"})
+                await websocket.close(code=4001, reason="Invalid key")
+                return
+
+            await websocket.send_json({"type": "auth", "status": "ok"})
+            from inferall.api.websocket import websocket_chat
+            await websocket_chat(websocket, orchestrator, dispatcher, _pre_accepted=True)
+        else:
+            from inferall.api.websocket import websocket_chat
+            await websocket_chat(websocket, orchestrator, dispatcher)
 
     # ------------------------------------------------------------------
     # GET /v1/queue/stats — Dispatcher queue monitoring

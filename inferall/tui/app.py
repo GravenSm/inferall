@@ -393,9 +393,12 @@ class DashboardApp(App):
         status.update(f"Pulling {model_name}... (this may take a while)")
 
         import subprocess
+        import shutil
         try:
+            # Find inferall in PATH (works with any install method)
+            inferall_bin = shutil.which("inferall") or "inferall"
             result = subprocess.run(
-                [str(Path.home() / ".venvs/model_engine/bin/model_engine"), "pull", model_name],
+                [inferall_bin, "pull", model_name],
                 capture_output=True, text=True, timeout=600,
             )
             if result.returncode == 0:
