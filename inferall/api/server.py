@@ -290,15 +290,34 @@ class TTSRequest(BaseModel):
 # =============================================================================
 
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB default limit for all uploads
+_UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for streaming read
 
 async def _read_upload(file, max_bytes: int = _MAX_UPLOAD_BYTES):
-    """Read an uploaded file with size limit. Raises ValueError if too large."""
-    content = await file.read()
-    if len(content) > max_bytes:
+    """
+    Read an uploaded file with size limit, aborting early if too large.
+    Uses chunked reads to avoid materializing oversized uploads fully in memory.
+    """
+    # Check Content-Length header first if available (fast reject)
+    if hasattr(file, 'size') and file.size and file.size > max_bytes:
         raise ValueError(
-            f"Upload too large ({len(content)} bytes). Max: {max_bytes} bytes."
+            f"Upload too large ({file.size} bytes). Max: {max_bytes} bytes."
         )
-    return content
+
+    # Streaming read with early abort
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(
+                f"Upload too large (>{max_bytes} bytes). Max: {max_bytes} bytes."
+            )
+        chunks.append(chunk)
+
+    return b"".join(chunks)
 
 
 # =============================================================================
@@ -396,7 +415,7 @@ def create_app(
     # ------------------------------------------------------------------
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest):
+    async def chat_completions(request: ChatCompletionRequest, raw_request: Request = None):
         # Validate n
         if request.n is not None and request.n > 1:
             return _error_response(
@@ -464,7 +483,8 @@ def create_app(
             )
 
         # Non-streaming: use per-model dispatcher
-        priority = getattr(getattr(request, 'state', None), 'priority', 0) if hasattr(request, 'state') else 0
+        # Priority comes from auth middleware on the FastAPI Request, not the Pydantic body
+        priority = getattr(getattr(raw_request, 'state', None), 'priority', 0) if raw_request else 0
         try:
             result = await dispatcher.submit(
                 request.model, orchestrator.generate,
@@ -1924,11 +1944,20 @@ def create_app(
 
             token = auth_msg["token"]
             authenticated = False
+            ws_key_info = None
 
             # Check multi-key store first
             if key_store is not None:
-                key_info = key_store.validate_key(token)
-                if key_info is not None:
+                ws_key_info = key_store.validate_key(token)
+                if ws_key_info is not None:
+                    # Check rate limit
+                    rate_error = key_store.check_rate_limit(ws_key_info)
+                    if rate_error:
+                        await websocket.send_json({"type": "error", "message": rate_error})
+                        await websocket.close(code=4008, reason="Rate limited")
+                        return
+                    # Log usage for the connection
+                    key_store.log_usage(ws_key_info.key_hash, endpoint="/v1/ws/chat")
                     authenticated = True
 
             # Fall back to single key
@@ -1942,7 +1971,10 @@ def create_app(
 
             await websocket.send_json({"type": "auth", "status": "ok"})
             from inferall.api.websocket import websocket_chat
-            await websocket_chat(websocket, orchestrator, dispatcher, _pre_accepted=True)
+            await websocket_chat(
+                websocket, orchestrator, dispatcher,
+                _pre_accepted=True, _key_info=ws_key_info, _key_store=key_store,
+            )
         else:
             from inferall.api.websocket import websocket_chat
             await websocket_chat(websocket, orchestrator, dispatcher)

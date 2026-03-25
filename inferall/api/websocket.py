@@ -27,6 +27,8 @@ async def websocket_chat(
     orchestrator,
     dispatcher,
     _pre_accepted: bool = False,
+    _key_info=None,
+    _key_store=None,
 ):
     """
     Handle a WebSocket chat connection.
@@ -50,6 +52,14 @@ async def websocket_chat(
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "message": "Invalid JSON"})
                 continue
+
+            # Per-request rate limiting for multi-key mode
+            if _key_info and _key_store:
+                rate_error = _key_store.check_rate_limit(_key_info)
+                if rate_error:
+                    await websocket.send_json({"type": "error", "message": rate_error})
+                    continue
+                _key_store.log_usage(_key_info.key_hash, endpoint="/v1/ws/chat")
 
             model_id = request.get("model", "")
             messages = request.get("messages", [])
