@@ -393,7 +393,7 @@ class HFResolver:
         """
         Download model files to our models directory.
 
-        - GGUF: single file download via hf_hub_download
+        - GGUF: single file download (curl with retries, fallback to hf_hub_download)
         - Everything else: full repo via snapshot_download
         """
         # Build local path: ~/.inferall/models/<org>/<name>/
@@ -408,13 +408,20 @@ class HFResolver:
         try:
             if fmt == ModelFormat.GGUF and gguf_file:
                 logger.info("Downloading GGUF file: %s", gguf_file)
-                downloaded = hf_hub_download(
-                    repo_id=model_id,
-                    filename=gguf_file,
-                    revision=revision,
-                    local_dir=local_dir,
-                )
-                logger.info("Downloaded to: %s", downloaded)
+                dest = local_dir / gguf_file
+                if not dest.exists():
+                    # Try curl first (handles large files better with resume + retries)
+                    url = f"https://huggingface.co/{model_id}/resolve/{revision}/{gguf_file}"
+                    if not self._download_with_curl(url, dest):
+                        # Fall back to hf_hub_download
+                        logger.info("curl unavailable, falling back to hf_hub_download")
+                        hf_hub_download(
+                            repo_id=model_id,
+                            filename=gguf_file,
+                            revision=revision,
+                            local_dir=local_dir,
+                        )
+                logger.info("Downloaded to: %s", dest)
             else:
                 logger.info("Downloading full model repo: %s", model_id)
                 # Ignore non-essential files (keep *.txt for tokenizer vocab/merges)
@@ -442,6 +449,49 @@ class HFResolver:
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
+
+    def _download_with_curl(self, url: str, dest: Path) -> bool:
+        """
+        Download a file using curl with resume support and retries.
+        Returns True if successful, False if curl is not available.
+        """
+        import shutil
+        import subprocess
+
+        curl_bin = shutil.which("curl")
+        if not curl_bin:
+            return False
+
+        logger.info("Downloading with curl: %s", dest.name)
+        try:
+            result = subprocess.run(
+                [
+                    curl_bin, "-L",
+                    "--retry", "5",
+                    "--retry-delay", "10",
+                    "--retry-max-time", "600",
+                    "-C", "-",             # Resume support
+                    "--progress-bar",
+                    "-o", str(dest),
+                    url,
+                ],
+                timeout=3600,              # 1 hour max
+            )
+            if result.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                logger.info("curl download complete: %s (%.2f GB)",
+                            dest.name, dest.stat().st_size / 1024**3)
+                return True
+            else:
+                logger.warning("curl download failed (exit code %d)", result.returncode)
+                if dest.exists():
+                    dest.unlink()
+                return False
+        except subprocess.TimeoutExpired:
+            logger.warning("curl download timed out after 1 hour")
+            return False
+        except Exception as e:
+            logger.warning("curl download error: %s", e)
+            return False
 
     def _get_revision(self, info) -> str:
         """Extract the commit SHA from model info."""
