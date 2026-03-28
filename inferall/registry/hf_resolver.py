@@ -207,17 +207,31 @@ class HFResolver:
         Auto-detect model format.
 
         Priority:
-        0. Non-chat pipeline tags → dedicated format (EMBEDDING, ASR, etc.)
-        1. Explicit --variant with GGUF → GGUF
-        2. Repo has .gguf files → GGUF
-        3. HF model tags (gptq, awq)
-        4. Config files (quantize_config.json, quantization_config in config.json)
-        5. Default → transformers
+        0. GGUF files ALWAYS take priority (explicit format, regardless of pipeline tag)
+        1. Non-chat pipeline tags → dedicated format (EMBEDDING, ASR, etc.)
+        2. HF model tags (gptq, awq)
+        3. Config files (quantize_config.json, quantization_config in config.json)
+        4. Default → transformers
 
         Returns:
             (format, gguf_filename_or_none)
         """
-        # 0. Non-chat tasks get their dedicated format
+        siblings = info.siblings or []
+        filenames = [s.rfilename for s in siblings]
+
+        # 0. GGUF files ALWAYS take priority — a repo with .gguf is a GGUF model
+        # regardless of pipeline tag (many GGUF repos have VLM/chat tags)
+        if variant is not None:
+            gguf_file = self._select_gguf_file(filenames, variant)
+            if gguf_file:
+                return ModelFormat.GGUF, gguf_file
+
+        gguf_files = [f for f in filenames if f.endswith(".gguf")]
+        if gguf_files:
+            gguf_file = self._select_gguf_file(filenames, variant)
+            return ModelFormat.GGUF, gguf_file
+
+        # 1. Non-chat tasks get their dedicated format
         tag = info.pipeline_tag
         if tag in ("feature-extraction", "sentence-similarity"):
             return ModelFormat.EMBEDDING, None
@@ -244,21 +258,6 @@ class HFResolver:
             return ModelFormat.TTS, None
         if tag == "text-ranking":
             return ModelFormat.RERANK, None
-
-        siblings = info.siblings or []
-        filenames = [s.rfilename for s in siblings]
-
-        # 1. Explicit variant flag
-        if variant is not None:
-            gguf_file = self._select_gguf_file(filenames, variant)
-            if gguf_file:
-                return ModelFormat.GGUF, gguf_file
-
-        # 2. Repo has .gguf files
-        gguf_files = [f for f in filenames if f.endswith(".gguf")]
-        if gguf_files:
-            gguf_file = self._select_gguf_file(filenames, variant)
-            return ModelFormat.GGUF, gguf_file
 
         # 3. HF model tags
         tags = set(info.tags or [])
