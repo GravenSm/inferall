@@ -50,11 +50,17 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
 
         processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=trust)
 
-        # Try AutoModelForVision2Seq, fall back to AutoModelForCausalLM
+        # Left-padding is required for batched generation with decoder-only VLMs
+        if hasattr(processor, "tokenizer") and hasattr(processor.tokenizer, "padding_side"):
+            processor.tokenizer.padding_side = "left"
+
+        # Build load kwargs — explicit bf16 is dramatically faster than 'auto'
+        # which often picks fp32. transformers 5.x defaults to SDPA attention
+        # (PyTorch 2 built-in flash) so we don't need to set it explicitly.
         load_kwargs = {
             "pretrained_model_name_or_path": model_path,
             "trust_remote_code": trust,
-            "torch_dtype": "auto",
+            "dtype": torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
         }
         if allocation.max_memory:
             load_kwargs["device_map"] = "auto"
@@ -63,8 +69,10 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
             load_kwargs["device_map"] = allocation.device_map
 
         model = self._load_model(load_kwargs)
+        model.eval()  # Inference mode — disables dropout, etc.
 
-        logger.info("Loaded VLM %s", record.model_id)
+        logger.info("Loaded VLM %s (dtype=%s)", record.model_id,
+                    next(model.parameters()).dtype)
 
         return LoadedModel(
             model_id=record.model_id,
@@ -141,8 +149,19 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
         # Get the underlying tokenizer (processors wrap one)
         tokenizer = getattr(processor, "tokenizer", processor)
 
-        # Collect EOS-like token IDs so the model stops at turn boundaries
+        # Seed EOS IDs from the model's own generation_config — this is critical for
+        # multi-EOS models like chandra-ocr-2 / qwen3_5 where the model ships with a
+        # list of valid stop tokens. Falling back to tokenizer.eos_token_id alone
+        # would miss them and let the model run to max_tokens.
         eos_ids = set()
+        gen_cfg_eos = getattr(getattr(loaded.model, "generation_config", None),
+                              "eos_token_id", None)
+        if gen_cfg_eos is not None:
+            if isinstance(gen_cfg_eos, (list, tuple)):
+                eos_ids.update(int(x) for x in gen_cfg_eos if x is not None)
+            else:
+                eos_ids.add(int(gen_cfg_eos))
+
         if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
             eos_ids.add(tokenizer.eos_token_id)
 
@@ -384,6 +403,7 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
                 "tokenize": True,
                 "return_dict": True,
                 "return_tensors": "pt",
+                "padding": True,  # chandra/HF batch path expects padded inputs
             }
             # Some processors accept images as a kwarg
             if all_images:
