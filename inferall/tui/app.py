@@ -163,6 +163,7 @@ class DashboardApp(App):
         Binding("1", "tab_dashboard", "Dashboard"),
         Binding("2", "tab_models", "Models"),
         Binding("3", "tab_keys", "Keys"),
+        Binding("v", "toggle_vllm", "Toggle vLLM"),
     ]
 
     # Reactive state
@@ -177,6 +178,9 @@ class DashboardApp(App):
         self._total_requests = 0
         self._total_errors = 0
         self._start_time = time.time()
+        # Maps Models-table row index → full model_id, populated on each
+        # _update_models_table() so the v keybinding can resolve the cursor.
+        self._model_ids_by_row: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -190,8 +194,10 @@ class DashboardApp(App):
                         yield PerformancePanel(id="perf-panel")
                         yield RichLog(id="log-panel", highlight=True, markup=True, wrap=True)
             with TabPane("Models", id="tab-models"):
-                yield Label("[b]Pulled Models[/b]  (R=Refresh)")
-                yield DataTable(id="models-table")
+                yield Label(
+                    "[b]Pulled Models[/b]  (R=Refresh, V=Toggle vLLM on highlighted row)"
+                )
+                yield DataTable(id="models-table", cursor_type="row")
                 yield Input(placeholder="Enter model name to pull (e.g., llama3.1 or meta-llama/Llama-3-8B)", id="model-input")
                 yield Label(id="model-action-status")
             with TabPane("Keys", id="tab-keys"):
@@ -331,19 +337,40 @@ class DashboardApp(App):
         except Exception:
             return
 
+        # Preserve which row the user had selected across refreshes
+        prev_cursor = table.cursor_row if table.row_count else 0
+
         table.clear(columns=True)
-        table.add_columns("Model", "Task", "Format", "Owner", "Created")
+        table.add_columns("Model", "Task", "Format", "Engine", "Owner", "Created")
+
+        # Remember the full model_id keyed by row index so the v keybinding
+        # can map cursor → model without parsing the (truncated) display name.
+        self._model_ids_by_row = []
 
         for m in models:
             model_id = m.get("id", "")
             task = m.get("task", "")
-            fmt = m.get("format", "")
+            fmt = m.get("format", "") or "-"
             owner = m.get("owned_by", "")
             created = m.get("created", 0)
             date_str = datetime.fromtimestamp(created).strftime("%Y-%m-%d") if created else "-"
 
+            engine_raw = m.get("preferred_engine")
+            if engine_raw == "vllm":
+                engine_display = "[green]vllm[/green]"
+            else:
+                engine_display = "[dim]default[/dim]"
+
             name = model_id.split("/")[-1][:35] if "/" in model_id else model_id[:35]
-            table.add_row(name, task, fmt, owner, date_str)
+            table.add_row(name, task, fmt, engine_display, owner, date_str)
+            self._model_ids_by_row.append(model_id)
+
+        # Restore cursor position (clamped to new row count)
+        if table.row_count:
+            try:
+                table.move_cursor(row=min(prev_cursor, table.row_count - 1))
+            except Exception:
+                pass
 
     def _update_keys_table(self) -> None:
         """Refresh the keys table."""
@@ -446,6 +473,70 @@ class DashboardApp(App):
 
     def action_tab_keys(self) -> None:
         self.query_one(TabbedContent).active = "tab-keys"
+
+    def action_toggle_vllm(self) -> None:
+        """
+        Toggle the vLLM backend on the highlighted row of the Models table.
+
+        Reads the current preferred_engine from /v1/models, calls
+        ``inferall vllm enable|disable`` via subprocess (matching the
+        existing pattern in _handle_model_pull), and refreshes the table.
+        Only acts when the Models tab is the active tab.
+        """
+        # Only meaningful when the Models tab is active
+        try:
+            tabs = self.query_one(TabbedContent)
+            if tabs.active != "tab-models":
+                return
+        except Exception:
+            return
+
+        status = self.query_one("#model-action-status", Label)
+        table = self.query_one("#models-table", DataTable)
+
+        if not self._model_ids_by_row or table.row_count == 0:
+            status.update("[yellow]No models to toggle.[/yellow]")
+            return
+
+        try:
+            row_idx = table.cursor_row
+            model_id = self._model_ids_by_row[row_idx]
+        except (IndexError, AttributeError):
+            status.update("[yellow]No row selected.[/yellow]")
+            return
+
+        # Read current state from the server so we know which direction to flip
+        try:
+            details = self.client.get(f"/v1/models/{model_id}")
+            currently_vllm = details.get("preferred_engine") == "vllm"
+        except Exception as e:
+            status.update(f"[red]Could not read model state: {e}[/red]")
+            return
+
+        action = "disable" if currently_vllm else "enable"
+        status.update(f"Running: inferall vllm {action} {model_id}...")
+
+        import shutil
+        import subprocess
+        try:
+            inferall_bin = shutil.which("inferall") or "inferall"
+            result = subprocess.run(
+                [inferall_bin, "vllm", action, model_id],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                new_state = "default" if currently_vllm else "vllm"
+                status.update(
+                    f"[green]{model_id} → {new_state}[/green]  "
+                    f"[dim](next load uses the new backend)[/dim]"
+                )
+            else:
+                err = (result.stderr or result.stdout or "").strip()[:200]
+                status.update(f"[red]Toggle failed: {err}[/red]")
+        except Exception as e:
+            status.update(f"[red]Error: {e}[/red]")
+
+        self.call_later(self._update_models_table)
 
     # -------------------------------------------------------------------------
     # Helpers

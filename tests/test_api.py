@@ -109,12 +109,66 @@ class TestListModels:
         record.model_id = "test/model"
         record.pulled_at = datetime.now()
         record.task = ModelTask.CHAT
+        record.format = ModelFormat.TRANSFORMERS
+        record.preferred_engine = None
         mock_registry.list_all.return_value = [record]
 
         resp = client.get("/v1/models")
         data = resp.json()
         assert len(data["data"]) == 1
-        assert data["data"][0]["id"] == "test/model"
+        entry = data["data"][0]
+        assert entry["id"] == "test/model"
+        # New fields the TUI Models tab depends on
+        assert entry["format"] == "transformers"
+        assert entry["preferred_engine"] is None
+
+    def test_lists_models_with_vllm_preference(self, client, mock_registry):
+        """Models opted into the vllm backend must surface preferred_engine='vllm'."""
+        from datetime import datetime
+        vllm_model = MagicMock()
+        vllm_model.model_id = "datalab-to/chandra-ocr-2"
+        vllm_model.pulled_at = datetime.now()
+        vllm_model.task = ModelTask.VISION_LANGUAGE
+        vllm_model.format = ModelFormat.VISION_LANGUAGE
+        vllm_model.preferred_engine = "vllm"
+
+        default_model = MagicMock()
+        default_model.model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+        default_model.pulled_at = datetime.now()
+        default_model.task = ModelTask.CHAT
+        default_model.format = ModelFormat.TRANSFORMERS
+        default_model.preferred_engine = None
+
+        mock_registry.list_all.return_value = [vllm_model, default_model]
+
+        resp = client.get("/v1/models")
+        data = resp.json()
+        assert len(data["data"]) == 2
+
+        by_id = {m["id"]: m for m in data["data"]}
+        assert by_id["datalab-to/chandra-ocr-2"]["preferred_engine"] == "vllm"
+        assert by_id["datalab-to/chandra-ocr-2"]["format"] == "vision_language"
+        assert by_id["Qwen/Qwen2.5-1.5B-Instruct"]["preferred_engine"] is None
+        assert by_id["Qwen/Qwen2.5-1.5B-Instruct"]["format"] == "transformers"
+
+    def test_get_model_includes_preferred_engine(self, client, mock_registry):
+        """The single-model endpoint must also expose preferred_engine."""
+        from datetime import datetime
+        record = MagicMock()
+        record.model_id = "test/vllm-model"
+        record.pulled_at = datetime.now()
+        record.task = ModelTask.CHAT
+        record.format = ModelFormat.TRANSFORMERS
+        record.file_size_bytes = 1024
+        record.param_count = 1_000_000
+        record.preferred_engine = "vllm"
+        mock_registry.get.return_value = record
+
+        resp = client.get("/v1/models/test/vllm-model")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_engine"] == "vllm"
+        assert data["format"] == "transformers"
 
 
 class TestChatCompletions:

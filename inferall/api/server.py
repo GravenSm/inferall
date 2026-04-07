@@ -1453,6 +1453,10 @@ def create_app(
                 "created": int(r.pulled_at.timestamp()) if r.pulled_at else 0,
                 "owned_by": r.model_id.split("/")[0] if "/" in r.model_id else "local",
                 "task": r.task.value,
+                "format": r.format.value,
+                # preferred_engine is None for default-backend models, "vllm" if
+                # the model has been opted into the vLLM backend.
+                "preferred_engine": getattr(r, "preferred_engine", None),
             })
         return {"object": "list", "data": models}
 
@@ -1474,6 +1478,7 @@ def create_app(
             "format": record.format.value,
             "file_size_bytes": record.file_size_bytes,
             "param_count": record.param_count,
+            "preferred_engine": getattr(record, "preferred_engine", None),
         }
 
     # ------------------------------------------------------------------
