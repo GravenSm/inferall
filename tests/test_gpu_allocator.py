@@ -178,3 +178,43 @@ class TestAllocationStrategies:
         """Every ModelFormat should have a bytes_per_param entry."""
         for fmt in ModelFormat:
             assert fmt in _BYTES_PER_PARAM, f"ModelFormat.{fmt.name} missing from _BYTES_PER_PARAM"
+
+    def test_balances_across_gpus_when_one_already_loaded(self):
+        """
+        Regression for the GPU 0 / GPU 1 balancing bug.
+
+        Previously, _try_single_gpu sorted purely by free memory descending,
+        so a slightly-emptier GPU 0 would consistently win even after multiple
+        models had already been placed on it. The fix prefers the GPU with
+        the fewest inferall-managed models, breaking ties by free memory.
+        """
+        # Both GPUs fit the model. GPU 0 has slightly more free memory but
+        # already has a model loaded by inferall; GPU 1 is empty.
+        mgr = _mock_gpu_manager(
+            n_gpus=2,
+            free_memory={0: 18 * 1024**3, 1: 16 * 1024**3},
+        )
+        # GPU 0 already has 1 inferall-managed model, GPU 1 has 0
+        mgr.get_gpu_model_count.side_effect = lambda i: {0: 1, 1: 0}.get(i, 0)
+        allocator = GPUAllocator(mgr, vram_buffer_mb=512)
+        record = _make_record(param_count=5_000_000_000)  # ~10GB, fits on either
+
+        plan = allocator.compute_allocation(record)
+
+        assert plan.gpu_ids == [1], (
+            f"Expected GPU 1 (least loaded) but got GPU {plan.gpu_ids}. "
+            "The balancing fix should prefer the GPU with fewer existing models."
+        )
+
+    def test_picks_emptier_gpu_when_load_is_equal(self):
+        """When both GPUs have the same number of loaded models, free VRAM breaks the tie."""
+        mgr = _mock_gpu_manager(
+            n_gpus=2,
+            free_memory={0: 12 * 1024**3, 1: 18 * 1024**3},
+        )
+        mgr.get_gpu_model_count.side_effect = lambda i: 0  # Both empty
+        allocator = GPUAllocator(mgr, vram_buffer_mb=512)
+        record = _make_record(param_count=5_000_000_000)
+
+        plan = allocator.compute_allocation(record)
+        assert plan.gpu_ids == [1], "GPU 1 should win the tiebreaker (more free VRAM)"

@@ -277,30 +277,55 @@ class GPUAllocator:
         estimated_vram: int,
         gpu_free: Dict[int, int],
     ) -> Optional[AllocationPlan]:
-        """Try to fit the model on a single GPU (the one with most free memory)."""
-        # Sort by free memory descending
-        sorted_gpus = sorted(gpu_free.items(), key=lambda x: x[1], reverse=True)
+        """
+        Try to fit the model on a single GPU.
 
-        for gpu_id, available in sorted_gpus:
-            if available >= estimated_vram:
-                max_memory_gib = available / 1024**3
-                plan = AllocationPlan(
-                    max_memory={gpu_id: f"{max_memory_gib:.1f}GiB"},
-                    device_map="auto",
-                    tensor_split=None,
-                    n_gpu_layers=-1,
-                    estimated_vram_bytes=estimated_vram,
-                    gpu_ids=[gpu_id],
-                )
-                logger.info(
-                    "Single GPU allocation for %s: GPU %d (%.2f GB available, "
-                    "%.2f GB estimated)",
-                    record.model_id, gpu_id,
-                    available / 1024**3, estimated_vram / 1024**3,
-                )
-                return plan
+        Selection order (only GPUs with enough free VRAM are eligible):
+          1. **fewest inferall-managed models** — load balancing across the
+             devices the orchestrator has visibility into
+          2. **most free physical memory** — tiebreaker that also accounts for
+             external processes the orchestrator doesn't track
+          3. **lowest device id** — final deterministic tiebreaker
 
-        return None
+        The previous implementation sorted purely by free memory, which meant
+        a slightly-emptier GPU 0 would consistently win and GPU 1 would sit
+        idle even after multiple models had been placed on GPU 0.
+        """
+        eligible = [
+            (gpu_id, available)
+            for gpu_id, available in gpu_free.items()
+            if available >= estimated_vram
+        ]
+        if not eligible:
+            return None
+
+        def _sort_key(item):
+            gpu_id, available = item
+            n_models = self.gpu_manager.get_gpu_model_count(gpu_id)
+            # Negate `available` so that *higher* free memory sorts before
+            # lower for the tiebreaker
+            return (n_models, -available, gpu_id)
+
+        eligible.sort(key=_sort_key)
+        gpu_id, available = eligible[0]
+        n_existing = self.gpu_manager.get_gpu_model_count(gpu_id)
+
+        max_memory_gib = available / 1024**3
+        plan = AllocationPlan(
+            max_memory={gpu_id: f"{max_memory_gib:.1f}GiB"},
+            device_map="auto",
+            tensor_split=None,
+            n_gpu_layers=-1,
+            estimated_vram_bytes=estimated_vram,
+            gpu_ids=[gpu_id],
+        )
+        logger.info(
+            "Single GPU allocation for %s: GPU %d (%.2f GB available, "
+            "%.2f GB estimated, %d existing models on this GPU)",
+            record.model_id, gpu_id,
+            available / 1024**3, estimated_vram / 1024**3, n_existing,
+        )
+        return plan
 
     def _try_multi_gpu(
         self,
