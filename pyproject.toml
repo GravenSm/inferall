@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferall"
-version = "0.1.0"
-description = "Universal inference engine for every AI model — chat, embeddings, vision, ASR, diffusion, TTS"
+version = "0.2.0"
+description = "Universal inference engine for every AI model — chat, embeddings, vision, ASR, diffusion, TTS, with optional vLLM acceleration"
 license = "MIT"
 requires-python = ">=3.10"
 

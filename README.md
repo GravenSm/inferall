@@ -10,7 +10,8 @@ InferAll is a self-hosted inference server that exposes an **OpenAI-compatible R
 - **Runs as a server** — start it with `inferall serve` and any client on your network can connect
 - **Multi-user ready** — per-API-key rate limiting, priority levels, and per-model request queuing so one user's request never blocks another's
 - **Pull from anywhere** — models from HuggingFace Hub, Ollama registry, or Ollama cloud, all through one CLI
-- **GPU optimized** — multi-GPU scheduling, VRAM-aware allocation, GGUF at full speed (113 tok/s on RTX 4090), plus fp16/GPTQ/AWQ/BNB quantization
+- **GPU optimized** — multi-GPU scheduling with load balancing, VRAM-aware allocation, GGUF at full speed (113 tok/s on RTX 4090), plus fp16/GPTQ/AWQ/BNB quantization
+- **Optional vLLM acceleration** — opt any chat or VLM model into a high-throughput vLLM backend for ~50% faster single-stream inference and continuous batching under load (chandra-ocr-2: 31.6 → 48.2 tok/s on RTX 4090)
 - **Production features** — Assistants API with threads and runs, Files API, Batch processing, Fine-tuning API, tool/function calling, structured JSON output
 - **Built-in dashboard** — terminal UI for real-time GPU monitoring, request queues, performance metrics, and model management
 
@@ -180,6 +181,17 @@ inferall status
 ```bash
 inferall remove Qwen/Qwen2.5-1.5B-Instruct
 ```
+
+### vLLM acceleration (optional)
+
+```bash
+inferall vllm install                              # bootstrap isolated vllm venv
+inferall vllm enable datalab-to/chandra-ocr-2     # opt a model in
+inferall vllm disable datalab-to/chandra-ocr-2    # revert to default backend
+inferall vllm status                              # show runtime location
+```
+
+See the [vLLM Backend](#vllm-backend-optional-high-throughput) section below for details.
 
 ## API Reference
 
@@ -452,6 +464,48 @@ trust_remote_code: false
 | `INFERALL_WORKERS` | 2 | Inference threads |
 | `INFERALL_BASE_DIR` | ~/.inferall | Data directory |
 
+## vLLM Backend (optional, high-throughput)
+
+For chat and vision-language models, InferAll can route inference through [vLLM](https://github.com/vllm-project/vllm) instead of the default HuggingFace transformers backend. vLLM uses PagedAttention, custom CUDA kernels, and continuous batching to deliver substantially higher throughput — especially for models with linear-attention layers (Qwen3-Next, chandra-ocr-2, etc.) where HF transformers can't apply its standard cache optimizations.
+
+### Why a separate venv?
+
+vLLM pins `transformers<5` while InferAll uses transformers 5.x, so embedding it directly would force a downgrade and rewrite of every existing backend. Instead, the vLLM backend runs vLLM as a subprocess in its own isolated venv and proxies requests over its OpenAI-compatible HTTP server. This is also how chandra and most production deployments run vLLM.
+
+### Setup
+
+```bash
+# One-time bootstrap — creates ~/.cache/inferall/vllm-venv and installs vllm
+inferall vllm install
+
+# Check that the runtime is detected
+inferall vllm status
+
+# Opt a model into the vLLM backend (persists in the registry)
+inferall vllm enable datalab-to/chandra-ocr-2
+
+# Revert to the default backend
+inferall vllm disable datalab-to/chandra-ocr-2
+
+# Or point at an existing vllm install instead of bootstrapping
+export INFERALL_VLLM_PYTHON=/path/to/vllm-venv/bin/python
+```
+
+After enabling, the next request to that model will spawn a vLLM subprocess and serve through it. Unloading the model (idle eviction, manual unload, or `inferall serve` shutdown) cleans up the subprocess and frees the GPU.
+
+### Tuning
+
+vLLM's defaults (`gpu_memory_utilization=0.9`, `max_num_seqs=256`) are sized for shared serving infrastructure and OOM almost immediately when other processes already use any GPU memory. InferAll picks conservative defaults and exposes four env vars for tuning:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `INFERALL_VLLM_GPU_MEMORY_UTILIZATION` | auto (≤0.85) | Fraction of total GPU memory vLLM may claim |
+| `INFERALL_VLLM_MAX_MODEL_LEN` | 4096 | Cap on context length (larger = bigger KV cache) |
+| `INFERALL_VLLM_MAX_NUM_SEQS` | 8 | Concurrent in-flight sequences |
+| `INFERALL_VLLM_PYTHON` | (auto-detect) | Path override for the vLLM interpreter |
+
+The auto memory budget is computed from currently free VRAM minus a 1.5 GiB safety buffer, then clamped to `[0.30, 0.85]`. Override it explicitly if you know exactly how much vLLM should claim.
+
 ## Performance
 
 All responses include a `performance` section with timing data:
@@ -469,10 +523,12 @@ Streaming responses include performance in the final SSE chunk.
 
 ### Benchmarks (RTX 4090)
 
-| Model | Format | tok/s |
-|-------|--------|-------|
+| Model | Backend | tok/s |
+|-------|---------|-------|
 | Llama 3.1 8B | GGUF Q4_K_M | ~113 |
 | Qwen 2.5 1.5B | Transformers fp16 | ~18.5 |
+| chandra-ocr-2 (5.3B VLM) | Transformers fp16 (default) | 31.6 |
+| chandra-ocr-2 (5.3B VLM) | **vLLM** | **48.2** |
 
 ## Architecture
 
@@ -483,6 +539,8 @@ inferall/
 │   ├── base.py            # ABCs and data structures
 │   ├── transformers_backend.py   # HF transformers (fp16/GPTQ/AWQ/BNB)
 │   ├── llamacpp_backend.py       # GGUF via llama.cpp
+│   ├── vllm_backend.py           # vLLM via subprocess + HTTP (opt-in)
+│   ├── vllm_runtime.py           # vLLM venv discovery + bootstrap
 │   ├── embedding_backend.py      # Sentence embeddings
 │   ├── rerank_backend.py         # Cross-encoder reranking
 │   ├── vlm_backend.py            # Vision-language models
@@ -493,13 +551,13 @@ inferall/
 │   ├── video_backend.py          # Text-to-video
 │   ├── seq2seq_backend.py        # Translation/summarization
 │   └── classification_backend.py # Classification, detection, segmentation, etc.
-├── cli/                   # Typer CLI (pull, run, serve, list, status, remove, login)
+├── cli/                   # Typer CLI (pull, run, serve, list, status, remove, login, vllm)
 ├── gpu/
 │   ├── manager.py         # GPU enumeration, VRAM tracking (pynvml)
-│   └── allocator.py       # VRAM estimation, multi-GPU allocation
+│   └── allocator.py       # VRAM estimation, multi-GPU allocation, load balancing
 ├── registry/
 │   ├── registry.py        # SQLite model registry with migrations
-│   ├── metadata.py        # ModelTask, ModelFormat enums
+│   ├── metadata.py        # ModelTask, ModelFormat enums, preferred_engine
 │   └── hf_resolver.py     # HuggingFace download + format auto-detection
 ├── orchestrator.py        # Model lifecycle, LRU eviction, ref counting
 └── config.py              # Layered configuration
