@@ -213,6 +213,21 @@ class ModelRegistry:
                 (now, model_id),
             )
 
+    def set_preferred_engine(self, model_id: str, engine: Optional[str]) -> bool:
+        """
+        Set or clear the preferred inference engine for a model.
+
+        Pass ``engine="vllm"`` to opt the model into the vLLM subprocess
+        backend, or ``None`` to revert to the format-default backend.
+        Returns True if the row existed and was updated.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE models SET preferred_engine = ? WHERE model_id = ?",
+                (engine, model_id),
+            )
+        return cursor.rowcount > 0
+
     # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
@@ -378,6 +393,11 @@ def _migration_v5_create_jobs_tables(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_v6_add_preferred_engine(conn: sqlite3.Connection) -> None:
+    """v6: Add preferred_engine column for opting models into the vLLM backend."""
+    conn.execute("ALTER TABLE models ADD COLUMN preferred_engine TEXT")
+
+
 # Register migrations
 ModelRegistry.MIGRATIONS = {
     1: _migration_v1_initial_schema,
@@ -385,4 +405,5 @@ ModelRegistry.MIGRATIONS = {
     3: _migration_v3_create_files_table,
     4: _migration_v4_create_assistants_tables,
     5: _migration_v5_create_jobs_tables,
+    6: _migration_v6_add_preferred_engine,
 }

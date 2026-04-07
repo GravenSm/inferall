@@ -10,6 +10,13 @@ from inferall.cli.commands.run import run
 from inferall.cli.commands.serve import serve
 from inferall.cli.commands.status import status
 from inferall.cli.commands.keys import keys_create, keys_list, keys_revoke, keys_usage
+from inferall.cli.commands.vllm_cmd import (
+    vllm_disable,
+    vllm_enable,
+    vllm_install,
+    vllm_status,
+    vllm_uninstall,
+)
 
 app = typer.Typer(
     name="inferall",
@@ -32,6 +39,15 @@ keys_app.command(name="list")(keys_list)
 keys_app.command(name="revoke")(keys_revoke)
 keys_app.command(name="usage")(keys_usage)
 app.add_typer(keys_app)
+
+# vLLM subcommands — manage the isolated vllm runtime + per-model opt-in
+vllm_app = typer.Typer(name="vllm", help="Manage the vLLM runtime and opt models in.")
+vllm_app.command(name="install")(vllm_install)
+vllm_app.command(name="status")(vllm_status)
+vllm_app.command(name="uninstall")(vllm_uninstall)
+vllm_app.command(name="enable")(vllm_enable)
+vllm_app.command(name="disable")(vllm_disable)
+app.add_typer(vllm_app)
 
 
 def main():

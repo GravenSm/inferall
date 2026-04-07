@@ -131,6 +131,7 @@ class ModelRecord:
     pulled_at: datetime
     last_used_at: Optional[datetime] = None
     task: ModelTask = ModelTask.CHAT        # Inferred from pipeline_tag
+    preferred_engine: Optional[str] = None  # "vllm" to opt this model into the vLLM subprocess backend; None = use default
 
     def to_db_row(self) -> dict:
         """Convert to a dict suitable for SQLite insertion."""
@@ -147,6 +148,7 @@ class ModelRecord:
             "pulled_at": self.pulled_at.isoformat(),
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
             "task": self.task.value,
+            "preferred_engine": self.preferred_engine,
         }
 
     @classmethod
@@ -169,4 +171,5 @@ class ModelRecord:
                 else None
             ),
             task=ModelTask(row["task"]) if row.get("task") else ModelTask.CHAT,
+            preferred_engine=row.get("preferred_engine"),
         )

@@ -145,6 +145,10 @@ class Orchestrator:
         self._seq2seq_backend = None
         self._classification_backend = None
         self._ollama_cloud_backend = None
+        # vLLM backend uses two thin wrappers around the same subprocess impl
+        # so it can satisfy both BaseBackend (text) and VisionLanguageBackend.
+        self._vllm_text_backend = None
+        self._vllm_vision_backend = None
 
         # Idle timeout thread
         self._shutdown_event = threading.Event()
@@ -223,6 +227,53 @@ class Orchestrator:
             return self._ollama_cloud_backend
         raise ValueError(f"No backend for format: {fmt}")
 
+    def _get_vllm_backend(self, fmt: ModelFormat):
+        """
+        Lazily instantiate the appropriate vLLM wrapper.
+
+        VLM and text models use different abstract base classes (so the
+        existing dispatch through ``loaded.backend_name`` keeps working),
+        but they share one subprocess implementation.
+        """
+        if fmt in _VLM_FORMATS:
+            if self._vllm_vision_backend is None:
+                from inferall.backends.vllm_backend import VLLMVisionBackend
+                self._vllm_vision_backend = VLLMVisionBackend()
+            return self._vllm_vision_backend
+        if self._vllm_text_backend is None:
+            from inferall.backends.vllm_backend import VLLMTextBackend
+            self._vllm_text_backend = VLLMTextBackend()
+        return self._vllm_text_backend
+
+    def _get_backend_for_record(self, record: ModelRecord):
+        """
+        Backend resolution at *load* time.
+
+        Honors ``record.preferred_engine`` if set, otherwise falls back
+        to format-based dispatch. This is the only entry point that
+        should be used inside ``get_or_load``.
+        """
+        if getattr(record, "preferred_engine", None) == "vllm":
+            return self._get_vllm_backend(record.format)
+        return self._get_backend(record.format)
+
+    def _get_backend_for_loaded(self, loaded: LoadedModel):
+        """
+        Backend resolution for an *already loaded* model.
+
+        Used by generate / stream / unload / evict / shutdown — anywhere we
+        only have a LoadedModel handle. We dispatch on ``backend_name``
+        first so vLLM models route back to the vLLM backend regardless of
+        their underlying ModelFormat.
+        """
+        if loaded.backend_name == "vllm":
+            # Reverse-derive whether this was a VLM or text model from the
+            # registry — we don't store the format on LoadedModel directly.
+            record = self.registry.get(loaded.model_id) if self.registry else None
+            fmt = record.format if record else ModelFormat.TRANSFORMERS
+            return self._get_vllm_backend(fmt)
+        return self._get_backend(self._format_from_backend_name(loaded.backend_name))
+
     # -------------------------------------------------------------------------
     # get_or_load — Two-Phase Locking
     # -------------------------------------------------------------------------
@@ -273,7 +324,7 @@ class Orchestrator:
             self._evict_if_needed()
 
             # Compute allocation
-            backend = self._get_backend(record.format)
+            backend = self._get_backend_for_record(record)
             allocation = self.allocator.compute_allocation(record)
 
             # Load the model (slow — no locks held)
@@ -329,11 +380,7 @@ class Orchestrator:
             self._ref_counts.pop(model_id, None)
         # global_lock released — do the actual unload outside
 
-        backend = self._get_backend(
-            ModelFormat(loaded.backend_name)
-            if loaded.backend_name in [f.value for f in ModelFormat]
-            else self._format_from_backend_name(loaded.backend_name)
-        )
+        backend = self._get_backend_for_loaded(loaded)
         backend.unload(loaded)
 
         # Release GPU allocation
@@ -385,9 +432,7 @@ class Orchestrator:
         """Generate a complete response. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.generate(loaded, messages, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -418,9 +463,7 @@ class Orchestrator:
         """
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             yield from backend.stream(loaded, messages, params, cancel)
         finally:
             self.release(model_id)
@@ -438,9 +481,7 @@ class Orchestrator:
         """Generate embeddings. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.embed(loaded, texts, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -462,9 +503,7 @@ class Orchestrator:
         """Transcribe audio. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.transcribe(loaded, audio_bytes, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -483,9 +522,7 @@ class Orchestrator:
         """Generate images. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.generate_image(loaded, prompt, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -507,9 +544,7 @@ class Orchestrator:
         """Edit an image via img2img. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.edit_image(loaded, prompt, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -531,9 +566,7 @@ class Orchestrator:
         """Generate a video. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.generate_video(loaded, prompt, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -555,9 +588,7 @@ class Orchestrator:
         """Synthesize speech. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.synthesize(loaded, text, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -577,9 +608,7 @@ class Orchestrator:
         """Rerank documents by relevance. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.rerank(loaded, query, documents, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -601,9 +630,7 @@ class Orchestrator:
         """Seq2seq generation (translate, summarize). Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.generate(loaded, text, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -628,9 +655,7 @@ class Orchestrator:
         """Classify input. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(
-                self._format_from_backend_name(loaded.backend_name)
-            )
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.classify(loaded, text, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -644,7 +669,7 @@ class Orchestrator:
         """Detect objects in an image. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(self._format_from_backend_name(loaded.backend_name))
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.detect_objects(loaded, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -658,7 +683,7 @@ class Orchestrator:
         """Segment an image. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(self._format_from_backend_name(loaded.backend_name))
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.segment_image(loaded, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -672,7 +697,7 @@ class Orchestrator:
         """Estimate depth from an image. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(self._format_from_backend_name(loaded.backend_name))
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.estimate_depth(loaded, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -686,7 +711,7 @@ class Orchestrator:
         """Answer a question about a document. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(self._format_from_backend_name(loaded.backend_name))
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.answer_document(loaded, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -700,7 +725,7 @@ class Orchestrator:
         """Process audio. Handles get_or_load + release."""
         loaded = self.get_or_load(model_id)
         try:
-            backend = self._get_backend(self._format_from_backend_name(loaded.backend_name))
+            backend = self._get_backend_for_loaded(loaded)
             t0 = time.perf_counter()
             result = backend.process_audio(loaded, params)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -731,9 +756,7 @@ class Orchestrator:
                 # Release global lock for the actual unload
                 self._global_lock.release()
                 try:
-                    backend = self._get_backend(
-                        self._format_from_backend_name(loaded.backend_name)
-                    )
+                    backend = self._get_backend_for_loaded(loaded)
                     backend.unload(loaded)
                     self._release_gpu_allocations(victim)
                     logger.info("Evicted model: %s", victim)
@@ -841,9 +864,7 @@ class Orchestrator:
                         self._ref_counts.pop(model_id, None)
                     else:
                         continue
-                backend = self._get_backend(
-                    self._format_from_backend_name(loaded.backend_name)
-                )
+                backend = self._get_backend_for_loaded(loaded)
                 backend.unload(loaded)
                 self._release_gpu_allocations(model_id)
             except Exception:
