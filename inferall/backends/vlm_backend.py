@@ -116,20 +116,14 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
         inputs, images = self._process_messages(loaded, messages)
         prompt_tokens = inputs["input_ids"].shape[1]
 
-        gen_kwargs = {
-            **inputs,
-            "max_new_tokens": params.max_tokens,
-            "do_sample": params.temperature > 0,
-        }
-        if params.temperature > 0:
-            gen_kwargs["temperature"] = params.temperature
-            gen_kwargs["top_p"] = params.top_p
+        gen_kwargs = self._build_gen_kwargs(loaded, inputs, params)
 
         with torch.inference_mode():
             output_ids = loaded.model.generate(**gen_kwargs)
 
         new_tokens = output_ids[0][prompt_tokens:]
         text = loaded.tokenizer.decode(new_tokens, skip_special_tokens=True)
+        text = self._strip_thinking_and_turns(text)
         completion_tokens = len(new_tokens)
 
         finish_reason = "length" if completion_tokens >= params.max_tokens else "stop"
@@ -140,6 +134,62 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
             completion_tokens=completion_tokens,
             finish_reason=finish_reason,
         )
+
+    def _build_gen_kwargs(self, loaded: LoadedModel, inputs: dict, params: GenerationParams) -> dict:
+        """Build generation kwargs with proper EOS token IDs and stopping criteria."""
+        processor = loaded.tokenizer
+        # Get the underlying tokenizer (processors wrap one)
+        tokenizer = getattr(processor, "tokenizer", processor)
+
+        # Collect EOS-like token IDs so the model stops at turn boundaries
+        eos_ids = set()
+        if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
+            eos_ids.add(tokenizer.eos_token_id)
+
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+        for token_name in ["<|im_end|>", "<|eot_id|>", "<|end|>",
+                           "<|im_start|>", "<|endoftext|>"]:
+            try:
+                tid = tokenizer.convert_tokens_to_ids(token_name)
+                if tid is not None and (unk_id is None or tid != unk_id):
+                    eos_ids.add(tid)
+            except Exception:
+                pass
+
+        gen_kwargs = {
+            **inputs,
+            "max_new_tokens": params.max_tokens,
+            "do_sample": params.temperature > 0,
+        }
+
+        if eos_ids:
+            gen_kwargs["eos_token_id"] = list(eos_ids) if len(eos_ids) > 1 else next(iter(eos_ids))
+            pad_id = getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None)
+            if pad_id is not None:
+                gen_kwargs["pad_token_id"] = pad_id
+
+        if params.temperature > 0:
+            gen_kwargs["temperature"] = params.temperature
+            gen_kwargs["top_p"] = params.top_p
+
+        return gen_kwargs
+
+    @staticmethod
+    def _strip_thinking_and_turns(text: str) -> str:
+        """Strip <think> blocks, role artifacts, and stop at turn boundaries."""
+        import re as _re
+        # Remove complete thinking blocks
+        text = _re.sub(r"<think>.*?</think>\s*", "", text, flags=_re.DOTALL)
+        # Remove unclosed thinking block at start
+        text = _re.sub(r"^<think>.*", "", text, flags=_re.DOTALL)
+        # Stop at turn markers (model generating fake conversation)
+        for marker in ("\nassistant\n", "\nuser\n", "\nsystem\n",
+                       "\nassistant:", "\nuser:", "\nsystem:",
+                       "\nA:", "\nhuman:", "\nHuman:", "\nAssistant:", "\nUser:"):
+            idx = text.find(marker)
+            if idx != -1:
+                text = text[:idx]
+        return text.strip()
 
     # -------------------------------------------------------------------------
     # Stream
@@ -156,19 +206,14 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
         loaded.touch()
 
         inputs, images = self._process_messages(loaded, messages)
+        gen_kwargs = self._build_gen_kwargs(loaded, inputs, params)
 
-        gen_kwargs = {
-            **inputs,
-            "max_new_tokens": params.max_tokens,
-            "do_sample": params.temperature > 0,
-        }
-        if params.temperature > 0:
-            gen_kwargs["temperature"] = params.temperature
-            gen_kwargs["top_p"] = params.top_p
+        # Use the underlying tokenizer for streaming
+        processor = loaded.tokenizer
+        stream_tokenizer = getattr(processor, "tokenizer", processor)
 
-        # Set up streamer
         streamer = TextIteratorStreamer(
-            loaded.tokenizer,
+            stream_tokenizer,
             skip_prompt=True,
             skip_special_tokens=True,
         )
@@ -181,12 +226,77 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
         )
         gen_thread.start()
 
+        # Same turn-boundary detection as TransformersBackend
+        _TURN_MARKERS = ("\nassistant\n", "\nuser\n", "\nsystem\n",
+                         "\nassistant:", "\nuser:", "\nsystem:",
+                         "\nA:", "\nhuman:", "\nHuman:",
+                         "\nAssistant:", "\nUser:")
         try:
+            in_think = False
+            buf = ""
+            stopped = False
             for token in streamer:
+                if stopped:
+                    continue
                 if cancel is not None and cancel.is_set():
                     break
-                if token:
-                    yield token
+                if not token:
+                    continue
+
+                buf += token
+
+                while buf and not stopped:
+                    if in_think:
+                        close_idx = buf.find("</think>")
+                        if close_idx != -1:
+                            buf = buf[close_idx + 8:].lstrip()
+                            in_think = False
+                            continue
+                        else:
+                            break
+                    else:
+                        open_idx = buf.find("<think>")
+                        if open_idx != -1:
+                            if open_idx > 0:
+                                yield buf[:open_idx]
+                            buf = buf[open_idx + 7:]
+                            in_think = True
+                            continue
+
+                        # Turn marker check
+                        marker_hit = False
+                        for marker in _TURN_MARKERS:
+                            m_idx = buf.find(marker)
+                            if m_idx != -1:
+                                if m_idx > 0:
+                                    yield buf[:m_idx]
+                                buf = ""
+                                stopped = True
+                                marker_hit = True
+                                break
+                        if marker_hit:
+                            break
+
+                        # Hold buffer if it ends with a partial marker
+                        hold = False
+                        if buf.endswith(("<", "<t", "<th", "<thi", "<thin", "<think")):
+                            hold = True
+                        if not hold:
+                            for marker in _TURN_MARKERS:
+                                for i in range(1, len(marker)):
+                                    if buf.endswith(marker[:i]):
+                                        hold = True
+                                        break
+                                if hold:
+                                    break
+                        if hold:
+                            break
+
+                        yield buf
+                        buf = ""
+
+            if buf and not in_think and not stopped:
+                yield buf
         finally:
             gen_thread.join(timeout=5.0)
 
@@ -225,57 +335,116 @@ class VisionLanguageTransformersBackend(VisionLanguageBackend):
         Handles OpenAI multimodal format:
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
 
-        Inserts the processor's image token (e.g., <image>) into the text
-        so the processor can match images to their positions.
+        Strategy:
+        1. Convert OpenAI messages → HF chat-template format with PIL images inline
+        2. Try processor.apply_chat_template() — modern multimodal processors handle
+           role tokens, image placeholders, and generation prompts automatically
+        3. Fall back to manual text concatenation for older processors
         """
         from PIL import Image
-
-        # Detect the processor's image placeholder token
         processor = loaded.tokenizer
-        image_token = getattr(processor, "image_token", "<image>")
 
-        images = []
-        text_parts = []
+        # Step 1: Convert OpenAI messages → HF format, extracting PIL images
+        hf_messages = []
+        all_images = []
 
         for msg in messages:
+            role = msg.get("role", "user")
             content = msg.get("content", "")
+
             if isinstance(content, str):
-                text_parts.append(f"{msg['role']}: {content}")
+                hf_messages.append({"role": role, "content": [{"type": "text", "text": content}]})
                 continue
 
-            # Multimodal content (list of parts)
+            # Multimodal content list
+            hf_content = []
             for part in content:
                 if isinstance(part, str):
-                    text_parts.append(part)
+                    hf_content.append({"type": "text", "text": part})
                 elif isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part["text"])
-                    elif part.get("type") == "image_url":
+                    ptype = part.get("type")
+                    if ptype == "text":
+                        hf_content.append({"type": "text", "text": part["text"]})
+                    elif ptype == "image_url":
                         image = self._load_image(part["image_url"]["url"])
-                        images.append(image)
-                        text_parts.append(image_token)
+                        all_images.append(image)
+                        hf_content.append({"type": "image"})
+                    elif ptype == "image":
+                        # Already in HF format
+                        if "image" in part:
+                            all_images.append(part["image"])
+                        hf_content.append({"type": "image"})
+            hf_messages.append({"role": role, "content": hf_content})
 
-        text = "\n".join(text_parts)
+        # Step 2: Try apply_chat_template (modern path)
+        inputs = None
+        try:
+            template_kwargs = {
+                "add_generation_prompt": True,
+                "tokenize": True,
+                "return_dict": True,
+                "return_tensors": "pt",
+            }
+            # Some processors accept images as a kwarg
+            if all_images:
+                try:
+                    inputs = processor.apply_chat_template(
+                        hf_messages, **template_kwargs,
+                    )
+                    # If the processor didn't fold images in, do it via processor()
+                    if "pixel_values" not in inputs and "image_grid_thw" not in inputs:
+                        # Re-run with explicit images
+                        text_only = processor.apply_chat_template(
+                            hf_messages, add_generation_prompt=True, tokenize=False,
+                        )
+                        inputs = processor(
+                            text=text_only, images=all_images, return_tensors="pt",
+                        )
+                except TypeError:
+                    # Some processors need images passed differently
+                    text_only = processor.apply_chat_template(
+                        hf_messages, add_generation_prompt=True, tokenize=False,
+                    )
+                    inputs = processor(
+                        text=text_only, images=all_images, return_tensors="pt",
+                    )
+            else:
+                inputs = processor.apply_chat_template(
+                    hf_messages, **template_kwargs,
+                )
+        except Exception as e:
+            logger.info("apply_chat_template failed (%s), using manual fallback", e)
+            inputs = None
 
-        # Build processor inputs
-        processor = loaded.tokenizer
-        if images:
-            inputs = processor(
-                text=text,
-                images=images,
-                return_tensors="pt",
-            )
-        else:
-            inputs = processor(
-                text=text,
-                return_tensors="pt",
-            )
+        # Step 3: Fallback — manual text concatenation
+        if inputs is None:
+            image_token = getattr(processor, "image_token", "<image>")
+            text_parts = []
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    text_parts.append(f"{msg['role']}: {content}")
+                else:
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "text":
+                                text_parts.append(part["text"])
+                            elif part.get("type") == "image_url":
+                                text_parts.append(image_token)
+            text = "\n".join(text_parts)
+
+            if all_images:
+                inputs = processor(
+                    text=text, images=all_images, return_tensors="pt",
+                )
+            else:
+                inputs = processor(text=text, return_tensors="pt")
 
         # Move to model device
         device = next(loaded.model.parameters()).device
         inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
-        return inputs, images
+        return inputs, all_images
 
     def _load_image(self, url: str) -> "Image.Image":
         """Load an image from a URL or base64 data URI."""
