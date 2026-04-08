@@ -1,13 +1,50 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+# setuptools >= 77 is required for the PEP 639 SPDX license expression below.
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferall"
 version = "0.2.1"
 description = "Universal inference engine for every AI model — chat, embeddings, vision, ASR, diffusion, TTS, with optional vLLM acceleration"
+readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [
+    {name = "GravenSm", email = "GravenSm@users.noreply.github.com"},
+]
+keywords = [
+    "inference",
+    "llm",
+    "openai-compatible",
+    "huggingface",
+    "vllm",
+    "transformers",
+    "gguf",
+    "embeddings",
+    "vision-language",
+    "whisper",
+    "diffusion",
+    "self-hosted",
+    "ai-server",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
 
 dependencies = [
     "torch>=2.0",
@@ -40,6 +77,12 @@ all = ["inferall[gguf,gptq,awq,bnb,multimodal,dev]"]
 [project.scripts]
 inferall = "inferall.cli.app:main"
 inferall_dashboard = "inferall.tui.__main__:main"
+
+[project.urls]
+Homepage = "https://inferall.dev"
+Repository = "https://github.com/GravenSm/inferall"
+Issues = "https://github.com/GravenSm/inferall/issues"
+Changelog = "https://github.com/GravenSm/inferall/releases"
 
 [tool.setuptools.packages.find]
 include = ["inferall*"]
