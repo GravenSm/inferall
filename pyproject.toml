@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferall"
-version = "0.2.3"
+version = "0.2.4"
 description = "Universal inference engine for every AI model — chat, embeddings, vision, ASR, diffusion, TTS, with optional vLLM acceleration"
 readme = "README.md"
 license = "MIT"
@@ -53,6 +53,10 @@ dependencies = [
     "huggingface-hub>=0.20",
     "fastapi>=0.104",
     "uvicorn[standard]>=0.24",
+    # sse-starlette is imported unconditionally at api/server.py module
+    # load time for the streaming chat completion endpoint, so it must
+    # be a core dependency — `inferall serve` cannot start without it.
+    "sse-starlette>=2.0",
     "typer>=0.9",
     "rich>=13.0",
     "pyyaml>=6.0",

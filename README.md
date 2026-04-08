@@ -76,9 +76,6 @@ pip install -e ".[all,dev]"
 ### 4. Extra dependencies for specific tasks
 
 ```bash
-# SSE streaming (required for streaming chat)
-pip install sse-starlette
-
 # Object detection (DETR, YOLO)
 pip install timm
 
