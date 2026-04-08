@@ -492,9 +492,11 @@ vLLM's defaults (`gpu_memory_utilization=0.9`, `max_num_seqs=256`) are sized for
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `INFERALL_VLLM_GPU_MEMORY_UTILIZATION` | auto (≤0.85) | Fraction of total GPU memory vLLM may claim |
-| `INFERALL_VLLM_MAX_MODEL_LEN` | 4096 | Cap on context length (larger = bigger KV cache) |
-| `INFERALL_VLLM_MAX_NUM_SEQS` | 8 | Concurrent in-flight sequences |
+| `INFERALL_VLLM_MAX_MODEL_LEN` | 8192 | Cap on context length (larger = bigger KV cache) |
+| `INFERALL_VLLM_MAX_NUM_SEQS` | 4 | Concurrent in-flight sequences |
 | `INFERALL_VLLM_PYTHON` | (auto-detect) | Path override for the vLLM interpreter |
+
+The KV cache pool size is `max_num_seqs × max_model_len`. The defaults (4 × 8192 = 32k tokens) are tuned for OCR and document workloads where per-request context matters more than concurrency. For chat-heavy workloads with shorter contexts, raise `INFERALL_VLLM_MAX_NUM_SEQS` and lower `INFERALL_VLLM_MAX_MODEL_LEN` to keep the pool the same size.
 
 The auto memory budget is computed from currently free VRAM minus a 1.5 GiB safety buffer, then clamped to `[0.30, 0.85]`. Override it explicitly if you know exactly how much vLLM should claim.
 

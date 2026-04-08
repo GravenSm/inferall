@@ -249,17 +249,30 @@ class _VLLMBackendBase:
 
         return 0.70
 
-    # Cap on context length, in tokens. Larger means bigger KV cache, which
-    # can OOM the GPU even before any inference happens. 4k is enough for
-    # almost every interactive chat use case, including single-page OCR.
+    # Cap on context length, in tokens. The KV cache pool size is
+    # max_num_seqs * max_model_len, so these two constants trade off:
+    # bigger context means smaller concurrent batch (or more VRAM).
+    #
+    # 8k matches chandra-ocr-2's full capability and is enough for a
+    # dense OCR page that has to emit layout-annotated HTML for every
+    # block on the page (which 4k could truncate). Most modern chat
+    # models also support 8k+ natively, so this is a reasonable default.
+    #
     # Override per model with INFERALL_VLLM_MAX_MODEL_LEN.
-    _MAX_MODEL_LEN_CAP = 4096
+    _MAX_MODEL_LEN_CAP = 8192
 
     # Cap on concurrent in-flight sequences. vLLM's default is 256 which
     # is sized for shared serving infrastructure; for an interactive engine
     # like inferall a much smaller pool keeps the KV cache footprint sane.
+    #
+    # 4 keeps the pool size (max_num_seqs * max_model_len = 32k tokens)
+    # identical to the previous (max_num_seqs=8, max_model_len=4096)
+    # default — same VRAM budget, just spent on per-request context
+    # instead of concurrency. For chat-heavy workloads with shorter
+    # contexts, bump this back up via the env var.
+    #
     # Override with INFERALL_VLLM_MAX_NUM_SEQS.
-    _MAX_NUM_SEQS_CAP = 8
+    _MAX_NUM_SEQS_CAP = 4
 
     def _compute_max_num_seqs(self) -> int:
         """Concurrent in-flight sequences. Override with INFERALL_VLLM_MAX_NUM_SEQS."""
