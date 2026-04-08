@@ -21,20 +21,69 @@ console = Console()
 
 
 def serve(
-    port: int = typer.Option(None, "--port", "-p", help="Port to listen on"),
-    host: str = typer.Option(None, "--host", help="Host to bind to"),
+    port: int = typer.Option(
+        None, "--port", "-p",
+        help="Port to listen on. Default: 8000 (override with INFERALL_PORT).",
+    ),
+    host: str = typer.Option(
+        None, "--host",
+        help=(
+            "Address to bind to. Default: 127.0.0.1 (local-only). "
+            "Use 0.0.0.0 to expose the server on your LAN — set an API key first."
+        ),
+    ),
     api_key: Optional[str] = typer.Option(
-        None, "--api-key", help="API key for authentication (prefer INFERALL_API_KEY env var)",
+        None, "--api-key",
+        help=(
+            "Require this API key on every request. Prefer the INFERALL_API_KEY "
+            "env var so the key isn't visible in `ps`. Without this flag (and "
+            "without the env var) the server runs without auth — fine for "
+            "127.0.0.1, dangerous on 0.0.0.0."
+        ),
     ),
     compat_mode: str = typer.Option(
         "strict", "--compat-mode",
-        help="Compatibility mode: 'strict' (reject unsupported) or 'lenient' (strip with warning)",
+        help=(
+            "How to handle OpenAI request fields InferAll doesn't implement. "
+            "'strict' returns 400 (recommended for development), 'lenient' "
+            "silently strips them (use only if a third-party client sends "
+            "fields you can't control)."
+        ),
     ),
     workers: Optional[int] = typer.Option(
-        None, "--workers", help="Inference thread pool size",
+        None, "--workers",
+        help=(
+            "Number of inference worker threads. Default: 2. Increase for "
+            "more concurrent requests across different models — within a "
+            "single model concurrency is still capped by concurrency_per_model."
+        ),
     ),
 ) -> None:
-    """Start the OpenAI-compatible API server."""
+    """
+    Start the OpenAI-compatible API server.
+
+    By default the server binds to 127.0.0.1:8000 with no authentication —
+    safe for local-only use. Models load on demand the first time a request
+    asks for them, and unload after the idle timeout.
+
+    [bold]Common patterns:[/bold]
+
+      [cyan]inferall serve[/cyan]                              [dim]# local-only, no auth, port 8000[/dim]
+      [cyan]inferall serve --port 8080[/cyan]                  [dim]# pick a different port[/dim]
+      [cyan]INFERALL_API_KEY=secret inferall serve[/cyan]      [dim]# require auth (recommended)[/dim]
+      [cyan]inferall serve --host 0.0.0.0[/cyan]               [dim]# expose to LAN — set a key first![/dim]
+      [cyan]inferall serve --workers 4[/cyan]                  [dim]# more concurrent inference[/dim]
+
+    The server stays in the foreground; press [bold]Ctrl+C[/bold] to stop.
+    All loaded models are unloaded cleanly on shutdown.
+
+    Once running, point any OpenAI SDK at [cyan]http://<host>:<port>/v1[/cyan]
+    and your existing client code works without changes. Try it with:
+
+      [cyan]curl http://localhost:8000/v1/models[/cyan]
+
+    First time? Pull a model first with [cyan]inferall pull <model-id>[/cyan].
+    """
     # Build config with CLI overrides
     overrides = {}
     if port is not None:
@@ -121,21 +170,40 @@ def serve(
     )
 
     # Print startup info
-    console.print(f"\n[bold]InferAll API Server[/bold]")
-    console.print(f"  Listening: http://{config.default_host}:{config.default_port}")
-    console.print(f"  Auth: {'[green]enabled[/green]' if resolved_api_key else '[yellow]disabled[/yellow]'}")
+    base_url = f"http://{config.default_host}:{config.default_port}"
+    console.print(f"\n[bold cyan]InferAll API Server[/bold cyan]")
+    console.print(f"  URL:         [bold]{base_url}[/bold]  [dim](OpenAI base_url: {base_url}/v1)[/dim]")
+    console.print(
+        f"  Auth:        "
+        + ("[green]enabled[/green]" if resolved_api_key else "[yellow]disabled[/yellow] (local-only)")
+    )
+    console.print(f"  Workers:     {config.inference_workers}")
     console.print(f"  Compat mode: {compat_mode}")
-    console.print(f"  Workers: {config.inference_workers}")
 
     # List available models
     records = registry.list_all()
     if records:
-        console.print(f"\n  Available models ({len(records)}):")
+        console.print(f"\n  [bold]Available models ({len(records)}):[/bold]")
         for r in records:
-            console.print(f"    - {r.model_id} ({r.format.value})")
+            engine_marker = ""
+            if getattr(r, "preferred_engine", None) == "vllm":
+                engine_marker = "  [green](vllm)[/green]"
+            console.print(f"    • {r.model_id} [dim]({r.format.value})[/dim]{engine_marker}")
     else:
-        console.print("\n  [yellow]No models pulled yet.[/yellow] Run: inferall pull <model>")
+        console.print(
+            "\n  [yellow]No models pulled yet.[/yellow] "
+            "Pull one to get started:\n"
+            "    [cyan]inferall pull Qwen/Qwen2.5-1.5B-Instruct[/cyan]   [dim]# small chat model[/dim]\n"
+            "    [cyan]inferall pull llama3.1[/cyan]                      [dim]# from Ollama registry[/dim]"
+        )
 
+    # Quick-test hint — the single most useful thing a first-time user
+    # can do to confirm the server is reachable
+    console.print(
+        f"\n  [dim]Test it:[/dim] "
+        f"[cyan]curl {base_url}/v1/models[/cyan]"
+    )
+    console.print(f"  [dim]Stop:[/dim]    [cyan]Ctrl+C[/cyan]")
     console.print()
 
     # Start uvicorn

@@ -22,6 +22,9 @@ app = typer.Typer(
     name="inferall",
     help="Personal inference engine for HuggingFace models — chat, embeddings, vision, ASR, diffusion, TTS.",
     no_args_is_help=True,
+    # Lets command docstrings use [cyan]...[/cyan] / [bold]...[/bold] etc.
+    # in --help output. Also enables nicer panels around the help body.
+    rich_markup_mode="rich",
 )
 
 app.command()(pull)
