@@ -1,5 +1,9 @@
 # InferAll
 
+[![PyPI version](https://img.shields.io/pypi/v/inferall.svg)](https://pypi.org/project/inferall/)
+[![Python versions](https://img.shields.io/pypi/pyversions/inferall.svg)](https://pypi.org/project/inferall/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Run any AI model locally — one unified API for chat, vision, speech, images, video, and more. Built for multi-user serving.**
 
 InferAll is a self-hosted inference server that exposes an **OpenAI-compatible REST API** for every type of AI model. Point any OpenAI SDK client, LangChain, LlamaIndex, or custom application at InferAll and it just works — no code changes needed.
@@ -27,56 +31,47 @@ Chat/LLM · Embeddings · Reranking · Vision-Language · Speech Recognition · 
 
 ## Installation
 
-### 1. Clone and create virtual environment
+### Quick install (from PyPI)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install torch        # install PyTorch first so the right CUDA build is picked
+pip install inferall     # then InferAll
+```
+
+Verify:
+```bash
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
+inferall --help
+```
+
+**Full install** (all model types — chat + embeddings + diffusion + ASR + TTS + GGUF):
+```bash
+pip install "inferall[all]"
+```
+
+**Custom install** (pick what you need):
+```bash
+pip install "inferall[gguf]"        # GGUF / llama.cpp
+pip install "inferall[bnb]"         # bitsandbytes 4/8-bit
+pip install "inferall[gptq]"        # GPTQ models
+pip install "inferall[awq]"         # AWQ models
+pip install "inferall[multimodal]"  # embeddings + diffusion + ASR + TTS
+```
+
+### Install from source (for contributors)
 
 ```bash
 git clone https://github.com/GravenSm/inferall.git
 cd inferall
 python3 -m venv .venv
 source .venv/bin/activate
+pip install torch
+pip install -e ".[all,dev]"
 ```
 
 > **Note:** If your filesystem doesn't support symlinks (NTFS, exFAT), use `python3 -m venv --copies .venv` or create the venv on a native Linux filesystem.
-
-### 2. Install PyTorch first (with CUDA)
-
-```bash
-pip install torch>=2.0
-```
-
-Verify CUDA works:
-```bash
-python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
-```
-
-### 3. Install InferAll
-
-**Minimal** (chat + embeddings):
-```bash
-pip install -e .
-```
-
-**Full install** (all model types):
-```bash
-pip install -e ".[all]"
-```
-
-**Custom install** (pick what you need):
-```bash
-# GGUF support (llama.cpp)
-pip install -e ".[gguf]"
-
-# Quantized models
-pip install -e ".[bnb]"     # bitsandbytes 4/8-bit
-pip install -e ".[gptq]"    # GPTQ models
-pip install -e ".[awq]"     # AWQ models
-
-# Multi-modal
-pip install -e ".[multimodal]"  # embeddings + diffusion + ASR + TTS
-
-# Development
-pip install -e ".[dev]"     # pytest + httpx
-```
 
 ### 4. Extra dependencies for specific tasks
 
