@@ -166,3 +166,169 @@ class TestTranscriptionEndpoint:
             files={"file": ("audio.wav", b"bytes", "audio/wav")},
         )
         assert resp.status_code == 404
+
+    def test_verbose_json_includes_segments_and_task(self, client, mock_orchestrator):
+        """response_format=verbose_json must surface backend-populated segments."""
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(
+            text="Hello world",
+            language="en",
+            duration=2.5,
+            segments=[
+                {"id": 0, "start": 0.0, "end": 1.2, "text": "Hello "},
+                {"id": 1, "start": 1.2, "end": 2.5, "text": "world"},
+            ],
+        )
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/whisper", "response_format": "verbose_json"},
+            files={"file": ("audio.wav", b"fake", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["text"] == "Hello world"
+        assert data["language"] == "en"
+        assert data["duration"] == 2.5
+        assert data["task"] == "transcribe"
+        assert len(data["segments"]) == 2
+        assert data["segments"][0]["text"] == "Hello "
+        assert data["segments"][0]["start"] == 0.0
+        assert data["segments"][0]["end"] == 1.2
+
+    def test_default_json_omits_segments_when_backend_returns_none(self, client, mock_orchestrator):
+        """With response_format=json (default) and no segments, body should not have a segments key."""
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(
+            text="hi",
+            language="en",
+        )
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/whisper"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "segments" not in data
+        assert "task" not in data  # task only emitted for verbose_json
+
+    def test_default_json_surfaces_segments_if_backend_provided(self, client, mock_orchestrator):
+        """Defence-in-depth: if a backend populated segments anyway, don't drop them."""
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(
+            text="hi",
+            language="en",
+            segments=[{"id": 0, "start": 0.0, "end": 0.8, "text": "hi"}],
+        )
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/whisper"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["segments"] == [{"id": 0, "start": 0.0, "end": 0.8, "text": "hi"}]
+
+    def test_response_format_forwarded_to_transcription_params(self, client, mock_orchestrator):
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(text="x")
+
+        client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/w", "response_format": "verbose_json"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        _, _, params = mock_orchestrator.transcribe.call_args.args
+        assert params.response_format == "verbose_json"
+
+    def test_invalid_response_format_rejected(self, client, mock_orchestrator):
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/w", "response_format": "bogus"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+        assert resp.status_code == 400
+        assert "response_format" in resp.text.lower()
+
+    def test_text_response_format_returns_plain_text(self, client, mock_orchestrator):
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(text="Hello there")
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/w", "response_format": "text"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        assert resp.text == "Hello there"
+
+    def test_uppercase_response_format_normalised(self, client, mock_orchestrator):
+        """Match OpenAI's lenient parsing — VERBOSE_JSON should work."""
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(
+            text="x",
+            segments=[{"id": 0, "start": 0.0, "end": 1.0, "text": "x"}],
+        )
+
+        resp = client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "test/w", "response_format": "VERBOSE_JSON"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        assert "segments" in resp.json()
+
+
+class TestTranslationEndpoint:
+    def test_verbose_json_includes_segments_and_translate_task(self, client, mock_orchestrator):
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(
+            text="Hello world",
+            language="de",  # source language from backend
+            duration=2.5,
+            segments=[{"id": 0, "start": 0.0, "end": 2.5, "text": "Hello world"}],
+        )
+
+        resp = client.post(
+            "/v1/audio/translations",
+            data={"model": "test/whisper", "response_format": "verbose_json"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["text"] == "Hello world"
+        # Translations always report English as the output language
+        assert data["language"] == "en"
+        assert data["task"] == "translate"
+        assert data["segments"][0]["text"] == "Hello world"
+
+    def test_default_json_omits_segments(self, client, mock_orchestrator):
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(text="hi", language="fr")
+
+        resp = client.post(
+            "/v1/audio/translations",
+            data={"model": "test/whisper"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "segments" not in data
+        assert data["language"] == "en"  # always English on /translations
+
+    def test_translation_response_format_forwarded(self, client, mock_orchestrator):
+        mock_orchestrator.transcribe.return_value = TranscriptionResult(text="x")
+
+        client.post(
+            "/v1/audio/translations",
+            data={"model": "test/w", "response_format": "verbose_json"},
+            files={"file": ("a.wav", b"x", "audio/wav")},
+        )
+
+        _, _, params = mock_orchestrator.transcribe.call_args.args
+        assert params.response_format == "verbose_json"
+        assert params.task == "translate"

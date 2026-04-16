@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -291,6 +291,41 @@ class TTSRequest(BaseModel):
 
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB default limit for all uploads
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for streaming read
+
+# Whisper-style response formats. `json` is the permissive default; `verbose_json`
+# adds segments + task; `text` returns PlainTextResponse with just the text.
+# srt / vtt are accepted by OpenAI but we don't format subtitles server-side yet.
+_TRANSCRIPTION_RESPONSE_FORMATS = {"json", "verbose_json", "text"}
+
+
+def _build_transcription_body(
+    result,
+    response_format: str,
+    task: str,
+    language_override: Optional[str] = None,
+) -> dict:
+    """Build the JSON body for a transcription/translation response.
+
+    Always includes text / language / duration / performance. Includes
+    segments whenever the backend populated them (independent of the
+    requested format — if the user asked for verbose_json, backends should
+    have filled segments; if they came back from a default request, we
+    don't drop them). Adds a `task` field for verbose_json to match the
+    OpenAI shape.
+    """
+    body = {
+        "text": result.text,
+        "language": language_override if language_override is not None else result.language,
+        "duration": result.duration,
+        "performance": {
+            "total_time_ms": result.total_time_ms,
+        },
+    }
+    if result.segments is not None:
+        body["segments"] = result.segments
+    if response_format == "verbose_json":
+        body["task"] = task
+    return body
 
 async def _read_upload(file, max_bytes: int = _MAX_UPLOAD_BYTES):
     """
@@ -783,13 +818,27 @@ def create_app(
         file: UploadFile = File(...),
         model: str = Form(...),
         language: Optional[str] = Form(None),
+        response_format: str = Form("json"),
     ):
+        response_format = (response_format or "json").lower()
+        if response_format not in _TRANSCRIPTION_RESPONSE_FORMATS:
+            return _error_response(
+                400,
+                f"Invalid response_format '{response_format}'. "
+                f"Must be one of: {', '.join(sorted(_TRANSCRIPTION_RESPONSE_FORMATS))}.",
+                param="response_format",
+                code="invalid_response_format",
+            )
+
         try:
             audio_bytes = await _read_upload(file)
         except ValueError as e:
             return _error_response(413, str(e), code="file_too_large")
 
-        params = TranscriptionParams(language=language)
+        params = TranscriptionParams(
+            language=language,
+            response_format=response_format,
+        )
 
         try:
             await asyncio.wait_for(
@@ -820,14 +869,12 @@ def create_app(
         finally:
             inference_semaphore.release()
 
-        return JSONResponse(content={
-            "text": result.text,
-            "language": result.language,
-            "duration": result.duration,
-            "performance": {
-                "total_time_ms": result.total_time_ms,
-            },
-        })
+        if response_format == "text":
+            return PlainTextResponse(content=result.text or "")
+
+        return JSONResponse(
+            content=_build_transcription_body(result, response_format, task="transcribe"),
+        )
 
     # ------------------------------------------------------------------
     # POST /v1/audio/translations
@@ -837,13 +884,27 @@ def create_app(
     async def create_translation(
         file: UploadFile = File(...),
         model: str = Form(...),
+        response_format: str = Form("json"),
     ):
+        response_format = (response_format or "json").lower()
+        if response_format not in _TRANSCRIPTION_RESPONSE_FORMATS:
+            return _error_response(
+                400,
+                f"Invalid response_format '{response_format}'. "
+                f"Must be one of: {', '.join(sorted(_TRANSCRIPTION_RESPONSE_FORMATS))}.",
+                param="response_format",
+                code="invalid_response_format",
+            )
+
         try:
             audio_bytes = await _read_upload(file)
         except ValueError as e:
             return _error_response(413, str(e), code="file_too_large")
 
-        params = TranscriptionParams(task="translate")
+        params = TranscriptionParams(
+            task="translate",
+            response_format=response_format,
+        )
 
         try:
             await asyncio.wait_for(
@@ -874,14 +935,15 @@ def create_app(
         finally:
             inference_semaphore.release()
 
-        return JSONResponse(content={
-            "text": result.text,
-            "language": "en",
-            "duration": result.duration,
-            "performance": {
-                "total_time_ms": result.total_time_ms,
-            },
-        })
+        if response_format == "text":
+            return PlainTextResponse(content=result.text or "")
+
+        # /v1/audio/translations always returns English regardless of source language
+        return JSONResponse(
+            content=_build_transcription_body(
+                result, response_format, task="translate", language_override="en",
+            ),
+        )
 
     # ------------------------------------------------------------------
     # POST /v1/images/generations

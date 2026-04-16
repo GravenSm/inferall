@@ -48,6 +48,83 @@ class TestASRBackendProperties:
         assert backend.name == "asr"
 
 
+class TestWhisperBackendSegmentExtraction:
+    """Unit tests for the transformers WhisperBackend segment-extraction helper.
+
+    Exercises _extract_segments directly with fake processors instead of
+    running a real model, since the full transcription path needs audio
+    tensors + a loaded Whisper that we can't spin up in CI.
+    """
+
+    def test_extracts_segments_from_offsets(self):
+        from inferall.backends.asr_backend import WhisperBackend
+        backend = WhisperBackend()
+
+        fake_processor = MagicMock()
+        fake_processor.batch_decode.return_value = [{
+            "text": "Hello world.",
+            "offsets": [
+                {"text": "Hello ", "timestamp": (0.0, 1.2)},
+                {"text": "world.", "timestamp": (1.2, 2.4)},
+            ],
+        }]
+
+        segments = backend._extract_segments(fake_processor, predicted_ids=MagicMock())
+
+        assert segments is not None
+        assert len(segments) == 2
+        assert segments[0] == {"id": 0, "start": 0.0, "end": 1.2, "text": "Hello "}
+        assert segments[1] == {"id": 1, "start": 1.2, "end": 2.4, "text": "world."}
+
+    def test_returns_none_when_decode_raises(self):
+        """Different transformers versions expose offsets differently.
+        Any failure must degrade gracefully to text-only, not crash the request."""
+        from inferall.backends.asr_backend import WhisperBackend
+        backend = WhisperBackend()
+
+        fake_processor = MagicMock()
+        fake_processor.batch_decode.side_effect = TypeError(
+            "output_offsets not supported by this tokenizer"
+        )
+        assert backend._extract_segments(fake_processor, MagicMock()) is None
+
+    def test_returns_none_when_decode_shape_unexpected(self):
+        from inferall.backends.asr_backend import WhisperBackend
+        backend = WhisperBackend()
+
+        fake_processor = MagicMock()
+        fake_processor.batch_decode.return_value = "unexpected shape"
+        assert backend._extract_segments(fake_processor, MagicMock()) is None
+
+    def test_returns_none_on_empty_offsets(self):
+        from inferall.backends.asr_backend import WhisperBackend
+        backend = WhisperBackend()
+
+        fake_processor = MagicMock()
+        fake_processor.batch_decode.return_value = [{"text": "silence", "offsets": []}]
+        assert backend._extract_segments(fake_processor, MagicMock()) is None
+
+    def test_handles_missing_timestamp_fields(self):
+        """Corrupted offset entries shouldn't crash — unknown times default to 0.0."""
+        from inferall.backends.asr_backend import WhisperBackend
+        backend = WhisperBackend()
+
+        fake_processor = MagicMock()
+        fake_processor.batch_decode.return_value = [{
+            "text": "foo bar",
+            "offsets": [
+                {"text": "foo"},  # no timestamp key at all
+                {"text": "bar", "timestamp": (None, None)},
+            ],
+        }]
+
+        segments = backend._extract_segments(fake_processor, MagicMock())
+        assert segments is not None
+        assert len(segments) == 2
+        assert segments[0] == {"id": 0, "start": 0.0, "end": 0.0, "text": "foo"}
+        assert segments[1]["text"] == "bar"
+
+
 class TestDiffusionBackendProperties:
     def test_name(self):
         from inferall.backends.diffusion_backend import DiffusersBackend

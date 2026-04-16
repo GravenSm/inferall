@@ -112,14 +112,27 @@ class WhisperBackend(ASRBackend):
         if params.language:
             gen_kwargs["language"] = params.language
 
+        # When the client asks for verbose_json we need per-segment timestamps,
+        # which Whisper's `generate` produces via return_timestamps. This
+        # changes the shape of predicted_ids subtly, which is why we only
+        # enable it on-demand rather than unconditionally.
+        want_timestamps = (params.response_format == "verbose_json")
+        if want_timestamps:
+            gen_kwargs["return_timestamps"] = True
+
         with torch.inference_mode():
             predicted_ids = loaded.model.generate(**inputs, **gen_kwargs)
 
         text = processor.decode(predicted_ids[0], skip_special_tokens=True)
 
+        segments = None
+        if want_timestamps:
+            segments = self._extract_segments(processor, predicted_ids)
+
         return TranscriptionResult(
             text=text.strip(),
             language=params.language,
+            segments=segments,
         )
 
     # -------------------------------------------------------------------------
@@ -167,6 +180,53 @@ class WhisperBackend(ASRBackend):
             audio_array = np.mean(audio_array, axis=1)
 
         return audio_array, sample_rate
+
+    def _extract_segments(self, processor, predicted_ids):
+        """Decode Whisper predicted_ids with offset timestamps into segment dicts.
+
+        Shape returned matches the faster-whisper / OpenAI verbose_json
+        segment objects: ``{"id": int, "start": float, "end": float, "text": str}``.
+        Returns None on any decode failure (different transformers versions
+        expose the offsets API slightly differently) so the transcription
+        path never regresses to an error — the caller just omits segments.
+        """
+        try:
+            decoded = processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True,
+                output_offsets=True,
+            )
+        except Exception:
+            logger.debug(
+                "Whisper timestamp decode failed; returning text-only result",
+                exc_info=True,
+            )
+            return None
+
+        if not decoded or not isinstance(decoded, list):
+            return None
+
+        first = decoded[0]
+        if not isinstance(first, dict):
+            return None
+        chunks = first.get("offsets") or []
+
+        segments = []
+        for i, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                continue
+            timestamp = chunk.get("timestamp") or (None, None)
+            try:
+                start, end = timestamp[0], timestamp[1]
+            except (TypeError, IndexError):
+                start, end = None, None
+            segments.append({
+                "id": i,
+                "start": float(start) if start is not None else 0.0,
+                "end": float(end) if end is not None else 0.0,
+                "text": chunk.get("text", ""),
+            })
+        return segments or None
 
     def _resample(self, audio, orig_sr: int, target_sr: int):
         """Resample audio to target sample rate."""
