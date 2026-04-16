@@ -17,7 +17,7 @@ InferAll is a self-hosted inference server that exposes an **OpenAI-compatible R
 - **GPU optimized** — multi-GPU scheduling with load balancing, VRAM-aware allocation, GGUF at full speed (113 tok/s on RTX 4090), plus fp16/GPTQ/AWQ/BNB quantization
 - **Optional vLLM acceleration** — opt any chat or VLM model into a high-throughput vLLM backend for ~50% faster single-stream inference and continuous batching under load (chandra-ocr-2: 31.6 → 48.2 tok/s on RTX 4090)
 - **Production features** — Assistants API with threads and runs, Files API, Batch processing, Fine-tuning API, tool/function calling, structured JSON output
-- **Built-in dashboard** — terminal UI for real-time GPU monitoring, request queues, performance metrics, and model management
+- **Built-in dashboard** — terminal UI for real-time GPU monitoring, request queues, performance metrics, and model management (launch with `inferall tui`)
 
 ### Supported model types
 
@@ -168,6 +168,15 @@ inferall list
 inferall status
 ```
 
+### Launch the dashboard
+
+Real-time GPU, queue, and loaded-model view in your terminal — connects to a running `inferall serve`:
+
+```bash
+inferall tui                                   # defaults to http://127.0.0.1:8000
+inferall tui --url http://10.0.0.5:9000        # or connect to a remote server
+```
+
 ### Remove a model
 
 ```bash
@@ -291,10 +300,18 @@ curl http://localhost:8000/v1/videos/generations \
 
 ### Speech Recognition (ASR)
 
+Works with both transformers-format Whisper and the CTranslate2 / [faster-whisper](https://github.com/SYSTRAN/faster-whisper) mirrors (`Systran/faster-whisper-*`). Format is auto-detected at pull time and routed to the appropriate backend.
+
 ```bash
+# Transformers-format Whisper
 curl http://localhost:8000/v1/audio/transcriptions \
   -F "file=@audio.wav" \
   -F "model=openai/whisper-tiny"
+
+# CTranslate2-format Whisper (Systran) — faster on CPU, lower VRAM on GPU
+curl http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "model=Systran/faster-whisper-large-v3"
 ```
 
 ### Text-to-Speech
@@ -412,7 +429,7 @@ curl http://localhost:8000/v1/models
 | Image Generation | `/v1/images/generations` | SDXL, Stable Diffusion | fp16 |
 | Image-to-Image | `/v1/images/edits` | SD img2img, ControlNet | fp16 |
 | Video Generation | `/v1/videos/generations` | CogVideoX, AnimateDiff | fp16 |
-| Speech Recognition | `/v1/audio/transcriptions` | Whisper | fp16 |
+| Speech Recognition | `/v1/audio/transcriptions` | OpenAI Whisper, Systran faster-whisper (CTranslate2) | fp16, int8 (CT2) |
 | Text-to-Speech | `/v1/audio/speech` | Bark, SpeechT5 | fp16 |
 | Classification | `/v1/classify` | ViT, CLIP, BART-MNLI | fp16 |
 | Object Detection | `/v1/detect` | DETR, OWL-ViT | fp16 |
@@ -538,14 +555,15 @@ inferall/
 │   ├── embedding_backend.py      # Sentence embeddings
 │   ├── rerank_backend.py         # Cross-encoder reranking
 │   ├── vlm_backend.py            # Vision-language models
-│   ├── asr_backend.py            # Whisper ASR
+│   ├── asr_backend.py            # Whisper ASR (transformers)
+│   ├── faster_whisper_backend.py # CTranslate2 Whisper (Systran faster-whisper)
 │   ├── tts_backend.py            # Bark/SpeechT5 TTS
 │   ├── diffusion_backend.py      # Text-to-image (diffusers)
 │   ├── img2img_backend.py        # Image-to-image
 │   ├── video_backend.py          # Text-to-video
 │   ├── seq2seq_backend.py        # Translation/summarization
 │   └── classification_backend.py # Classification, detection, segmentation, etc.
-├── cli/                   # Typer CLI (pull, run, serve, list, status, remove, login, vllm)
+├── cli/                   # Typer CLI (pull, run, serve, list, status, remove, login, vllm, tui)
 ├── gpu/
 │   ├── manager.py         # GPU enumeration, VRAM tracking (pynvml)
 │   └── allocator.py       # VRAM estimation, multi-GPU allocation, load balancing
