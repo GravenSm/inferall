@@ -36,14 +36,14 @@ class TestRegistryMigrations:
     def test_fresh_db_runs_all_migrations(self, tmp_path):
         db_path = tmp_path / "test.db"
         registry = ModelRegistry(db_path)
-        assert registry.get_schema_version() == 6
+        assert registry.get_schema_version() == 7
         registry.close()
 
     def test_idempotent_migrate(self, tmp_path):
         db_path = tmp_path / "test.db"
         registry = ModelRegistry(db_path)
         registry.migrate()  # should be a no-op
-        assert registry.get_schema_version() == 6
+        assert registry.get_schema_version() == 7
         registry.close()
 
     def test_models_table_has_task_column(self, tmp_path):

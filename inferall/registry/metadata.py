@@ -46,7 +46,8 @@ class ModelFormat(Enum):
     # Multi-modal formats
     EMBEDDING = "embedding"                # sentence-transformers / AutoModel
     VISION_LANGUAGE = "vision_language"     # AutoProcessor + model
-    ASR = "asr"                            # Whisper-style
+    ASR = "asr"                            # Whisper-style (transformers AutoModelForSpeechSeq2Seq)
+    FASTER_WHISPER = "faster_whisper"      # CTranslate2-format Whisper (Systran, etc.)
     DIFFUSION = "diffusion"                # diffusers pipeline
     TTS = "tts"                            # Bark / XTTS
     RERANK = "rerank"                      # CrossEncoder / reranker
@@ -99,6 +100,7 @@ FORMAT_TO_TASK: Dict[ModelFormat, ModelTask] = {
     ModelFormat.EMBEDDING: ModelTask.EMBEDDING,
     ModelFormat.VISION_LANGUAGE: ModelTask.VISION_LANGUAGE,
     ModelFormat.ASR: ModelTask.ASR,
+    ModelFormat.FASTER_WHISPER: ModelTask.ASR,
     ModelFormat.DIFFUSION: ModelTask.DIFFUSION,
     ModelFormat.TTS: ModelTask.TTS,
     ModelFormat.RERANK: ModelTask.RERANK,

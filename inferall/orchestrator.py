@@ -76,6 +76,7 @@ _TRANSFORMERS_FORMATS = {
 _EMBEDDING_FORMATS = {ModelFormat.EMBEDDING}
 _VLM_FORMATS = {ModelFormat.VISION_LANGUAGE}
 _ASR_FORMATS = {ModelFormat.ASR}
+_FASTER_WHISPER_FORMATS = {ModelFormat.FASTER_WHISPER}
 _DIFFUSION_FORMATS = {ModelFormat.DIFFUSION}
 _TTS_FORMATS = {ModelFormat.TTS}
 _RERANK_FORMATS = {ModelFormat.RERANK}
@@ -137,6 +138,7 @@ class Orchestrator:
         self._embedding_backend = None
         self._vlm_backend = None
         self._asr_backend = None
+        self._faster_whisper_backend = None
         self._diffusion_backend = None
         self._tts_backend = None
         self._rerank_backend = None
@@ -185,6 +187,11 @@ class Orchestrator:
                 from inferall.backends.asr_backend import WhisperBackend
                 self._asr_backend = WhisperBackend()
             return self._asr_backend
+        if fmt in _FASTER_WHISPER_FORMATS:
+            if self._faster_whisper_backend is None:
+                from inferall.backends.faster_whisper_backend import FasterWhisperBackend
+                self._faster_whisper_backend = FasterWhisperBackend()
+            return self._faster_whisper_backend
         if fmt in _DIFFUSION_FORMATS:
             if self._diffusion_backend is None:
                 from inferall.backends.diffusion_backend import DiffusersBackend
@@ -395,6 +402,7 @@ class Orchestrator:
             "embedding": ModelFormat.EMBEDDING,
             "vlm": ModelFormat.VISION_LANGUAGE,
             "asr": ModelFormat.ASR,
+            "faster_whisper": ModelFormat.FASTER_WHISPER,
             "diffusion": ModelFormat.DIFFUSION,
             "tts": ModelFormat.TTS,
             "rerank": ModelFormat.RERANK,

@@ -5,6 +5,7 @@ SQLite-backed registry for tracking pulled models.
 Supports schema versioning with forward-only migrations.
 """
 
+import json
 import logging
 import sqlite3
 from datetime import datetime
@@ -398,6 +399,74 @@ def _migration_v6_add_preferred_engine(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE models ADD COLUMN preferred_engine TEXT")
 
 
+def _looks_like_ct2_on_disk(local_path: Path) -> bool:
+    """Detect a CTranslate2 Whisper (faster-whisper) layout on disk.
+
+    Signature: `model.bin` present AND `config.json` present but lacks
+    `model_type`. Transformers-format Whisper has `model_type: "whisper"`
+    and ships `model.safetensors` / `pytorch_model.bin` instead of
+    `model.bin`, so this check is tight enough to avoid false positives.
+    Returns False on any I/O / JSON error — the migration should never
+    block registry init over a missing or unreadable config file.
+    """
+    try:
+        path = Path(local_path)
+    except TypeError:
+        return False
+    if not path.is_dir():
+        return False
+    config_path = path / "config.json"
+    model_bin = path / "model.bin"
+    if not config_path.is_file() or not model_bin.is_file():
+        return False
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    return "model_type" not in cfg
+
+
+def _migration_v7_reclassify_ct2_whisper(conn: sqlite3.Connection) -> None:
+    """v7: Reclassify ASR-format rows that are actually CTranslate2 Whisper.
+
+    Systran/faster-whisper-* (and other CT2 mirrors) were historically
+    registered with format='asr'. They can't load via transformers, so
+    the orchestrator would dispatch them to the wrong backend. After v7
+    we have ModelFormat.FASTER_WHISPER routing to the new backend; this
+    migration sweeps already-pulled models and fixes their format value
+    in place so the user doesn't need to re-pull.
+
+    Uses raw string literals instead of enum values so the migration is
+    stable against future enum renames.
+    """
+    cursor = conn.execute(
+        "SELECT model_id, local_path FROM models WHERE format = 'asr'"
+    )
+    rows = list(cursor.fetchall())
+    reclassified = 0
+    for row in rows:
+        model_id = row["model_id"]
+        local_path = Path(row["local_path"])
+        if _looks_like_ct2_on_disk(local_path):
+            logger.info(
+                "Reclassifying %s: asr -> faster_whisper (CTranslate2 detected)",
+                model_id,
+            )
+            conn.execute(
+                "UPDATE models SET format = 'faster_whisper' WHERE model_id = ?",
+                (model_id,),
+            )
+            reclassified += 1
+    if reclassified:
+        logger.info(
+            "v7 reclassified %d/%d ASR record(s) as faster_whisper",
+            reclassified, len(rows),
+        )
+
+
 # Register migrations
 ModelRegistry.MIGRATIONS = {
     1: _migration_v1_initial_schema,
@@ -406,4 +475,5 @@ ModelRegistry.MIGRATIONS = {
     4: _migration_v4_create_assistants_tables,
     5: _migration_v5_create_jobs_tables,
     6: _migration_v6_add_preferred_engine,
+    7: _migration_v7_reclassify_ct2_whisper,
 }

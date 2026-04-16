@@ -39,6 +39,7 @@ _BYTES_PER_PARAM = {
     ModelFormat.EMBEDDING: 2.0,
     ModelFormat.VISION_LANGUAGE: 2.0,
     ModelFormat.ASR: 2.0,
+    ModelFormat.FASTER_WHISPER: 2.0,         # CT2 float16 default; int8 is load-time
     ModelFormat.DIFFUSION: 2.0,
     ModelFormat.TTS: 2.0,
     ModelFormat.RERANK: 2.0,

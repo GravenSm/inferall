@@ -238,6 +238,16 @@ class HFResolver:
         if tag in ("image-text-to-text", "visual-question-answering"):
             return ModelFormat.VISION_LANGUAGE, None
         if tag == "automatic-speech-recognition":
+            # Systran and other CTranslate2-format Whisper mirrors advertise
+            # library_name == "ctranslate2" (and/or "ctranslate2" in tags).
+            # These ship model.bin + a CT2-style config.json that has no
+            # `model_type` field, so AutoModelForSpeechSeq2Seq cannot load
+            # them — they need the faster-whisper runtime instead.
+            library_attr = getattr(info, "library_name", None)
+            library = library_attr.lower() if isinstance(library_attr, str) else ""
+            asr_tags = {t.lower() for t in (info.tags or []) if isinstance(t, str)}
+            if library == "ctranslate2" or "ctranslate2" in asr_tags:
+                return ModelFormat.FASTER_WHISPER, None
             return ModelFormat.ASR, None
         if tag == "text-to-image":
             return ModelFormat.DIFFUSION, None
