@@ -1,7 +1,7 @@
 # InferAll
 
-[![PyPI version](https://img.shields.io/pypi/v/inferall.svg)](https://pypi.org/project/inferall/)
-[![Python versions](https://img.shields.io/pypi/pyversions/inferall.svg)](https://pypi.org/project/inferall/)
+[![PyPI version](https://img.shields.io/pypi/v/inferall.svg?v=0.2.8)](https://pypi.org/project/inferall/)
+[![Python versions](https://img.shields.io/pypi/pyversions/inferall.svg?v=0.2.8)](https://pypi.org/project/inferall/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Run any AI model locally — one unified API for chat, vision, speech, images, video, and more. Built for multi-user serving.**
