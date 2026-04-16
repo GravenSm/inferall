@@ -139,6 +139,258 @@ class TestBuildResult:
 
 
 # =============================================================================
+# Input Sanitization Tests (Bug 1)
+# =============================================================================
+
+class TestRerankSanitization:
+    """Empty/None/whitespace docs must not reach the tokenizer as seq_len=0."""
+
+    def _patched_backend(self):
+        """CrossEncoder-path backend that records what its dispatch receives."""
+        from inferall.backends.rerank_backend import CrossEncoderRerankerBackend
+        backend = CrossEncoderRerankerBackend()
+        captured = {}
+
+        def fake_cross_encoder(loaded, query, documents, params, original_documents=None):
+            captured["sanitized"] = list(documents)
+            captured["original"] = list(original_documents) if original_documents is not None else None
+            return RerankResult(
+                results=[{"index": i, "relevance_score": 0.0} for i in range(len(documents))],
+                model=loaded.model_id,
+                usage={"prompt_tokens": 0},
+            )
+
+        backend._rerank_cross_encoder = fake_cross_encoder
+        loaded = LoadedModel(
+            model_id="test/model",
+            backend_name="rerank",
+            model=MagicMock(),
+            tokenizer=None,
+        )
+        return backend, loaded, captured
+
+    def test_none_is_replaced_with_space(self):
+        backend, loaded, cap = self._patched_backend()
+        backend.rerank(loaded, "q", ["valid", None, "also valid"], RerankParams())
+        assert cap["sanitized"] == ["valid", " ", "also valid"]
+
+    def test_empty_string_is_replaced_with_space(self):
+        backend, loaded, cap = self._patched_backend()
+        backend.rerank(loaded, "q", ["", "valid"], RerankParams())
+        assert cap["sanitized"] == [" ", "valid"]
+
+    def test_whitespace_only_is_replaced_with_space(self):
+        backend, loaded, cap = self._patched_backend()
+        backend.rerank(loaded, "q", ["\n\t  ", "valid"], RerankParams())
+        assert cap["sanitized"] == [" ", "valid"]
+
+    def test_original_documents_preserved(self):
+        """return_documents must echo original text, not the " " placeholder."""
+        backend, loaded, cap = self._patched_backend()
+        docs = ["", None, "real"]
+        backend.rerank(loaded, "q", docs, RerankParams(return_documents=True))
+        assert cap["original"] == docs
+        assert cap["sanitized"] == [" ", " ", "real"]
+
+    def test_valid_documents_unchanged(self):
+        backend, loaded, cap = self._patched_backend()
+        docs = ["a", "b c", "d"]
+        backend.rerank(loaded, "q", docs, RerankParams())
+        assert cap["sanitized"] == docs
+
+
+# =============================================================================
+# Generative Reranker Detection (Bug 2)
+# =============================================================================
+
+class TestGenerativeRerankerDetection:
+    def test_id_helper_matches_qwen_reranker(self):
+        from inferall.backends.rerank_backend import _is_generative_reranker_id
+        assert _is_generative_reranker_id("Qwen/Qwen3-Reranker-8B") is True
+        assert _is_generative_reranker_id("qwen/qwen3-reranker-0.6b") is True
+
+    def test_id_helper_matches_gemma_reranker(self):
+        from inferall.backends.rerank_backend import _is_generative_reranker_id
+        assert _is_generative_reranker_id("google/gemma-reranker-v1") is True
+
+    def test_id_helper_rejects_standard_rerankers(self):
+        from inferall.backends.rerank_backend import _is_generative_reranker_id
+        assert _is_generative_reranker_id("cross-encoder/ms-marco-MiniLM-L-6-v2") is False
+        assert _is_generative_reranker_id("BAAI/bge-reranker-v2-m3") is False
+
+    def test_id_helper_rejects_qwen_without_reranker(self):
+        from inferall.backends.rerank_backend import _is_generative_reranker_id
+        assert _is_generative_reranker_id("Qwen/Qwen3-8B") is False
+
+    def test_instance_detects_qwen_reranker(self):
+        from inferall.backends.rerank_backend import CrossEncoderRerankerBackend
+        backend = CrossEncoderRerankerBackend()
+        loaded = LoadedModel(
+            model_id="Qwen/Qwen3-Reranker-8B",
+            backend_name="rerank",
+            model=MagicMock(),
+            tokenizer=MagicMock(),
+        )
+        assert backend._is_generative_reranker(loaded) is True
+
+    def test_instance_detects_via_chat_template_and_vocab(self):
+        """Fallback heuristic: large vocab + chat_template flags a generative LM."""
+        from inferall.backends.rerank_backend import CrossEncoderRerankerBackend
+        backend = CrossEncoderRerankerBackend()
+        tok = MagicMock()
+        tok.chat_template = "{{ messages }}"
+        model = MagicMock()
+        model.config.vocab_size = 151936  # Qwen3 vocab
+        loaded = LoadedModel(
+            model_id="some/unknown-reranker",  # not id-matched
+            backend_name="rerank",
+            model=model,
+            tokenizer=tok,
+        )
+        assert backend._is_generative_reranker(loaded) is True
+
+    def test_instance_rejects_small_vocab_reranker(self):
+        from inferall.backends.rerank_backend import CrossEncoderRerankerBackend
+        backend = CrossEncoderRerankerBackend()
+        tok = MagicMock()
+        tok.chat_template = None
+        model = MagicMock()
+        model.config.architectures = ["BertForSequenceClassification"]
+        model.config.vocab_size = 30522  # BERT-ish
+        loaded = LoadedModel(
+            model_id="cross-encoder/ms-marco-MiniLM-L-6-v2",
+            backend_name="rerank",
+            model=model,
+            tokenizer=tok,
+        )
+        assert backend._is_generative_reranker(loaded) is False
+
+
+# =============================================================================
+# config.json architectures-based Detection (load-time robustness)
+# =============================================================================
+
+class TestArchitectureBasedDetection:
+    def test_architectures_helper_matches_for_causal_lm(self):
+        from inferall.backends.rerank_backend import _architectures_suggest_causal_lm
+        assert _architectures_suggest_causal_lm(["Qwen3ForCausalLM"]) is True
+        assert _architectures_suggest_causal_lm(["LlamaForCausalLM"]) is True
+        assert _architectures_suggest_causal_lm(["GemmaForCausalLM"]) is True
+
+    def test_architectures_helper_rejects_seq_classification(self):
+        from inferall.backends.rerank_backend import _architectures_suggest_causal_lm
+        assert _architectures_suggest_causal_lm(["BertForSequenceClassification"]) is False
+        assert _architectures_suggest_causal_lm(["XLMRobertaForSequenceClassification"]) is False
+
+    def test_architectures_helper_rejects_seq2seq(self):
+        """T5/BART-style models have the wrong logit shape for _rerank_generative."""
+        from inferall.backends.rerank_backend import _architectures_suggest_causal_lm
+        assert _architectures_suggest_causal_lm(["T5ForConditionalGeneration"]) is False
+        assert _architectures_suggest_causal_lm(["BartForConditionalGeneration"]) is False
+
+    def test_architectures_helper_empty_list(self):
+        from inferall.backends.rerank_backend import _architectures_suggest_causal_lm
+        assert _architectures_suggest_causal_lm([]) is False
+
+    def test_read_architectures_missing_dir(self, tmp_path):
+        from inferall.backends.rerank_backend import _read_architectures
+        assert _read_architectures(tmp_path / "does-not-exist") == []
+
+    def test_read_architectures_missing_config_file(self, tmp_path):
+        from inferall.backends.rerank_backend import _read_architectures
+        assert _read_architectures(tmp_path) == []
+
+    def test_read_architectures_malformed_json(self, tmp_path):
+        from inferall.backends.rerank_backend import _read_architectures
+        (tmp_path / "config.json").write_text("{not json")
+        assert _read_architectures(tmp_path) == []
+
+    def test_read_architectures_no_architectures_field(self, tmp_path):
+        from inferall.backends.rerank_backend import _read_architectures
+        (tmp_path / "config.json").write_text('{"vocab_size": 32000}')
+        assert _read_architectures(tmp_path) == []
+
+    def test_read_architectures_valid_config(self, tmp_path):
+        from inferall.backends.rerank_backend import _read_architectures
+        (tmp_path / "config.json").write_text(
+            '{"architectures": ["Qwen3ForCausalLM"], "vocab_size": 151936}'
+        )
+        assert _read_architectures(tmp_path) == ["Qwen3ForCausalLM"]
+
+    def test_read_architectures_filters_non_strings(self, tmp_path):
+        """Malformed architectures entries (not strings) shouldn't crash or propagate."""
+        from inferall.backends.rerank_backend import _read_architectures
+        (tmp_path / "config.json").write_text(
+            '{"architectures": ["Qwen3ForCausalLM", null, 42]}'
+        )
+        assert _read_architectures(tmp_path) == ["Qwen3ForCausalLM"]
+
+    def test_load_detection_combines_id_and_config(self, tmp_path):
+        """id-based fast path + config.json fallback together."""
+        from inferall.backends.rerank_backend import _detect_generative_reranker_at_load
+        from inferall.registry.metadata import ModelFormat, ModelRecord, ModelTask
+
+        # id says generative → True regardless of config
+        rec1 = self._mk_record("Qwen/Qwen3-Reranker-8B", tmp_path)
+        assert _detect_generative_reranker_at_load(rec1) is True
+
+        # id doesn't match but config.json says ForCausalLM → True
+        (tmp_path / "config.json").write_text(
+            '{"architectures": ["LlamaForCausalLM"]}'
+        )
+        rec2 = self._mk_record("some-org/custom-reranker", tmp_path)
+        assert _detect_generative_reranker_at_load(rec2) is True
+
+    def test_load_detection_rejects_seq_classification_config(self, tmp_path):
+        from inferall.backends.rerank_backend import _detect_generative_reranker_at_load
+        (tmp_path / "config.json").write_text(
+            '{"architectures": ["XLMRobertaForSequenceClassification"]}'
+        )
+        rec = self._mk_record("BAAI/bge-reranker-v2-m3", tmp_path)
+        assert _detect_generative_reranker_at_load(rec) is False
+
+    def test_load_detection_missing_config_falls_back_safely(self, tmp_path):
+        """No config.json and no id match → treat as non-generative (safe default)."""
+        from inferall.backends.rerank_backend import _detect_generative_reranker_at_load
+        rec = self._mk_record("cross-encoder/ms-marco-MiniLM-L-6-v2", tmp_path)
+        assert _detect_generative_reranker_at_load(rec) is False
+
+    def test_instance_detects_via_config_architectures(self):
+        """Runtime detection: model whose id doesn't match but whose config does."""
+        from inferall.backends.rerank_backend import CrossEncoderRerankerBackend
+        backend = CrossEncoderRerankerBackend()
+        tok = MagicMock()
+        tok.chat_template = None  # isolate the architectures path
+        model = MagicMock()
+        model.config.architectures = ["Qwen3ForCausalLM"]
+        model.config.vocab_size = 151936
+        loaded = LoadedModel(
+            model_id="some-org/custom-reranker",  # id doesn't match
+            backend_name="rerank",
+            model=model,
+            tokenizer=tok,
+        )
+        assert backend._is_generative_reranker(loaded) is True
+
+    @staticmethod
+    def _mk_record(model_id, local_path):
+        from inferall.registry.metadata import ModelFormat, ModelRecord, ModelTask
+        return ModelRecord(
+            model_id=model_id,
+            revision="abc",
+            format=ModelFormat.RERANK,
+            local_path=local_path,
+            file_size_bytes=0,
+            param_count=None,
+            gguf_variant=None,
+            trust_remote_code=False,
+            pipeline_tag="text-ranking",
+            pulled_at=datetime.now(),
+            task=ModelTask.RERANK,
+        )
+
+
+# =============================================================================
 # Orchestrator Integration Tests
 # =============================================================================
 
