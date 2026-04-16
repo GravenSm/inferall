@@ -9,6 +9,7 @@ from inferall.cli.commands.remove import remove
 from inferall.cli.commands.run import run
 from inferall.cli.commands.serve import serve
 from inferall.cli.commands.status import status
+from inferall.cli.commands.tui import tui
 from inferall.cli.commands.keys import keys_create, keys_list, keys_revoke, keys_usage
 from inferall.cli.commands.vllm_cmd import (
     vllm_disable,
@@ -34,6 +35,7 @@ app.command()(serve)
 app.command(name="list")(list_models)
 app.command()(remove)
 app.command()(status)
+app.command()(tui)
 
 # Key management subcommands
 keys_app = typer.Typer(name="keys", help="Manage API keys for multi-user access.")

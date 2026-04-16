@@ -86,3 +86,43 @@ class TestRemoveCommand:
         result = runner.invoke(app, ["remove", "--help"])
         assert result.exit_code == 0
         assert "--yes" in result.output
+
+
+class TestTuiCommand:
+    def test_tui_is_registered_in_root_help(self):
+        """`inferall --help` should list the new tui subcommand."""
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "tui" in result.output
+
+    def test_tui_help(self):
+        result = runner.invoke(app, ["tui", "--help"])
+        assert result.exit_code == 0
+        assert "--url" in result.output
+        assert "-u" in result.output
+        assert "dashboard" in result.output.lower()
+
+    @patch("inferall.cli.commands.tui.run_dashboard")
+    def test_tui_default_url(self, mock_run_dashboard):
+        result = runner.invoke(app, ["tui"])
+        assert result.exit_code == 0
+        mock_run_dashboard.assert_called_once_with(server_url="http://127.0.0.1:8000")
+
+    @patch("inferall.cli.commands.tui.run_dashboard")
+    def test_tui_custom_url_long_flag(self, mock_run_dashboard):
+        result = runner.invoke(app, ["tui", "--url", "http://10.0.0.5:9000"])
+        assert result.exit_code == 0
+        mock_run_dashboard.assert_called_once_with(server_url="http://10.0.0.5:9000")
+
+    @patch("inferall.cli.commands.tui.run_dashboard")
+    def test_tui_custom_url_short_flag(self, mock_run_dashboard):
+        result = runner.invoke(app, ["tui", "-u", "http://inferall.local:8001"])
+        assert result.exit_code == 0
+        mock_run_dashboard.assert_called_once_with(server_url="http://inferall.local:8001")
+
+    @patch("inferall.cli.commands.tui.run_dashboard")
+    def test_tui_surfaces_dashboard_errors(self, mock_run_dashboard):
+        """If the dashboard itself raises, the CLI should not silently succeed."""
+        mock_run_dashboard.side_effect = RuntimeError("cannot connect to server")
+        result = runner.invoke(app, ["tui"])
+        assert result.exit_code != 0
