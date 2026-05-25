@@ -1,5 +1,6 @@
 #include "capture/capture.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/stereo.h"
 #include "perception/perception.h"
 #include "fusion/occupancy.h"
 #include "agent/fsm.h"
@@ -22,7 +23,7 @@ static void handle_signal(int sig) {
 }
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [--bench] [--dry-run] [--fps N] [--frames N]\n", prog);
+    fprintf(stderr, "Usage: %s [--bench] [--dry-run] [--fps N] [--frames N] [--mono]\n", prog);
 }
 
 int main(int argc, char **argv) {
@@ -30,10 +31,12 @@ int main(int argc, char **argv) {
     int dry_run = 0;
     int target_fps = 2;
     int max_frames = 0;
+    int stereo_mode = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--bench") == 0) bench_mode = 1;
         else if (strcmp(argv[i], "--dry-run") == 0) dry_run = 1;
+        else if (strcmp(argv[i], "--mono") == 0) stereo_mode = 0;
         else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) target_fps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) max_frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--help") == 0) { print_usage(argv[0]); return 0; }
@@ -50,7 +53,10 @@ int main(int argc, char **argv) {
     occupancy_grid_t grid;
     occupancy_init(&grid, 0.05f);
 
-    camera_intrinsics_t intrinsics = { .fx = 386.0f, .fy = 386.0f, .cx = 32.0f, .cy = 24.0f };
+    camera_intrinsics_t intrinsics = { .fx = 45.3f, .fy = 45.3f, .cx = 32.0f, .cy = 24.0f };
+
+    stereo_config_t stereo_cfg;
+    stereo_default_config(&stereo_cfg);
 
     fsm_context_t fsm;
     fsm_init(&fsm);
@@ -59,32 +65,61 @@ int main(int argc, char **argv) {
     if (ipc_publisher_init(VA_SHM_NAME, &ipc_state) != 0)
         VA_WARN("IPC init failed, continuing without shared memory");
 
-    uint8_t *raw_gray = malloc(VA_SRC_W * VA_SRC_H);
-    uint16_t *raw_depth = malloc(VA_SRC_W * VA_SRC_H * sizeof(uint16_t));
-    if (!raw_gray || !raw_depth) { VA_ERR("alloc failed"); return 1; }
+    int raw_pixels = VA_SRC_W * VA_SRC_H;
+    uint8_t *raw_left = malloc(raw_pixels);
+    uint8_t *raw_right = stereo_mode ? malloc(raw_pixels) : NULL;
+    uint16_t *raw_depth = stereo_mode ? NULL : malloc(raw_pixels * sizeof(uint16_t));
+    uint8_t right_small[VA_FRAME_PIXELS];
+
+    if (!raw_left || (stereo_mode && !raw_right) || (!stereo_mode && !raw_depth)) {
+        VA_ERR("alloc failed");
+        return 1;
+    }
 
     frame_t frame;
     uint8_t detections[VA_NUM_DETECTIONS];
     uint64_t frame_id = 0;
 
     uint64_t total_capture_us = 0, total_preprocess_us = 0;
+    uint64_t total_stereo_us = 0;
     uint64_t total_perception_us = 0, total_occupancy_us = 0;
     uint64_t total_fsm_us = 0;
 
-    VA_LOG("vision-agent started (fps=%d, dry_run=%d, bench=%d)", target_fps, dry_run, bench_mode);
+    VA_LOG("vision-agent started (fps=%d, stereo=%d, dry_run=%d, bench=%d)",
+           target_fps, stereo_mode, dry_run, bench_mode);
 
     while (running) {
         if (max_frames > 0 && (int)frame_id >= max_frames) break;
 
         uint64_t t0 = timing_now_us();
-
         uint64_t ts;
-        capture_frame(raw_gray, raw_depth, &ts);
+
+        if (stereo_mode) {
+            capture_frame_stereo(raw_left, raw_right, &ts);
+        } else {
+            capture_frame(raw_left, raw_depth, &ts);
+        }
         uint64_t t1 = timing_now_us();
 
-        preprocess_frame(raw_gray, raw_depth, VA_SRC_W, VA_SRC_H, &frame);
+        if (stereo_mode) {
+            preprocess_downsample_gray(raw_left, frame.gray,
+                                       VA_SRC_W, VA_SRC_H, VA_FRAME_W, VA_FRAME_H);
+            preprocess_downsample_gray(raw_right, right_small,
+                                       VA_SRC_W, VA_SRC_H, VA_FRAME_W, VA_FRAME_H);
+            frame.width = VA_FRAME_W;
+            frame.height = VA_FRAME_H;
+        } else {
+            preprocess_frame(raw_left, raw_depth, VA_SRC_W, VA_SRC_H, &frame);
+        }
         frame.timestamp_us = ts;
         uint64_t t2 = timing_now_us();
+
+        if (stereo_mode) {
+            stereo_compute_depth(frame.gray, right_small,
+                                 VA_FRAME_W, VA_FRAME_H,
+                                 frame.depth, &stereo_cfg);
+        }
+        uint64_t t2b = timing_now_us();
 
         perception_extract(&frame, detections);
         uint64_t t3 = timing_now_us();
@@ -105,7 +140,8 @@ int main(int argc, char **argv) {
 
         total_capture_us    += t1 - t0;
         total_preprocess_us += t2 - t1;
-        total_perception_us += t3 - t2;
+        total_stereo_us     += t2b - t2;
+        total_perception_us += t3 - t2b;
         total_occupancy_us  += t4 - t3;
         total_fsm_us        += t5 - t4;
         frame_id++;
@@ -114,12 +150,14 @@ int main(int argc, char **argv) {
             printf("--- %lu frames ---\n", (unsigned long)frame_id);
             printf("  capture:    %lu us avg\n", (unsigned long)(total_capture_us / frame_id));
             printf("  preprocess: %lu us avg\n", (unsigned long)(total_preprocess_us / frame_id));
+            if (stereo_mode)
+                printf("  stereo:     %lu us avg\n", (unsigned long)(total_stereo_us / frame_id));
             printf("  perception: %lu us avg\n", (unsigned long)(total_perception_us / frame_id));
             printf("  occupancy:  %lu us avg\n", (unsigned long)(total_occupancy_us / frame_id));
             printf("  fsm+motor:  %lu us avg\n", (unsigned long)(total_fsm_us / frame_id));
-            printf("  total:      %lu us avg\n", (unsigned long)(
-                (total_capture_us + total_preprocess_us + total_perception_us +
-                 total_occupancy_us + total_fsm_us) / frame_id));
+            uint64_t total = total_capture_us + total_preprocess_us + total_stereo_us +
+                             total_perception_us + total_occupancy_us + total_fsm_us;
+            printf("  total:      %lu us avg\n", (unsigned long)(total / frame_id));
         }
     }
 
@@ -127,11 +165,13 @@ int main(int argc, char **argv) {
         printf("\n=== Final (%lu frames) ===\n", (unsigned long)frame_id);
         printf("  capture:    %lu us avg\n", (unsigned long)(total_capture_us / frame_id));
         printf("  preprocess: %lu us avg\n", (unsigned long)(total_preprocess_us / frame_id));
+        if (stereo_mode)
+            printf("  stereo:     %lu us avg\n", (unsigned long)(total_stereo_us / frame_id));
         printf("  perception: %lu us avg\n", (unsigned long)(total_perception_us / frame_id));
         printf("  occupancy:  %lu us avg\n", (unsigned long)(total_occupancy_us / frame_id));
         printf("  fsm+motor:  %lu us avg\n", (unsigned long)(total_fsm_us / frame_id));
-        uint64_t total = total_capture_us + total_preprocess_us + total_perception_us +
-                         total_occupancy_us + total_fsm_us;
+        uint64_t total = total_capture_us + total_preprocess_us + total_stereo_us +
+                         total_perception_us + total_occupancy_us + total_fsm_us;
         printf("  total:      %lu us avg\n", (unsigned long)(total / frame_id));
         printf("  throughput: %lu FPS theoretical\n",
                (unsigned long)(frame_id > 0 && total > 0 ? (frame_id * 1000000ULL / total) : 0));
@@ -142,7 +182,8 @@ int main(int argc, char **argv) {
     perception_shutdown();
     capture_shutdown();
     if (ipc_state) ipc_publisher_shutdown(VA_SHM_NAME, ipc_state);
-    free(raw_gray);
+    free(raw_left);
+    free(raw_right);
     free(raw_depth);
 
     VA_LOG("vision-agent stopped after %lu frames", (unsigned long)frame_id);

@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
-project(vision-agent VERSION 0.1.0 LANGUAGES C)
+project(vision-agent VERSION 0.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(VA_WITH_REALSENSE "Build with RealSense camera support" OFF)
+option(VA_WITH_STEREO_CSI "Build with stereo CSI camera (Pi 5 + IMX219-83)" OFF)
 option(VA_WITH_NEON "Build ARM NEON assembly kernels" OFF)
 option(VA_WITH_GPIO "Build GPIO motor HAL (Raspberry Pi)" OFF)
 option(VA_BUILD_TESTS "Build unit tests" ON)
@@ -19,6 +20,7 @@ endif()
 add_library(va_core STATIC
     src/util/timing.c
     src/preprocess/preprocess.c
+    src/preprocess/stereo.c
     src/perception/perception.c
     src/fusion/occupancy.c
     src/agent/fsm.c
@@ -26,9 +28,12 @@ add_library(va_core STATIC
     src/ipc/ipc_client.c
 )
 target_include_directories(va_core PUBLIC src)
-target_link_libraries(va_core PRIVATE rt)
+target_link_libraries(va_core PRIVATE rt m)
 
-if(VA_WITH_REALSENSE)
+if(VA_WITH_STEREO_CSI)
+    target_sources(va_core PRIVATE src/capture/capture_stereo_csi.c)
+    target_compile_definitions(va_core PUBLIC VA_HAS_V4L2=1)
+elseif(VA_WITH_REALSENSE)
     find_package(realsense2 REQUIRED)
     target_sources(va_core PRIVATE src/capture/capture_realsense.c)
     target_link_libraries(va_core PRIVATE realsense2::realsense2)
@@ -53,6 +58,10 @@ if(VA_BUILD_TESTS)
     add_executable(test_preprocess tests/test_preprocess.c)
     target_link_libraries(test_preprocess PRIVATE va_core)
     add_test(NAME preprocess COMMAND test_preprocess)
+
+    add_executable(test_stereo tests/test_stereo.c)
+    target_link_libraries(test_stereo PRIVATE va_core)
+    add_test(NAME stereo COMMAND test_stereo)
 
     add_executable(test_occupancy tests/test_occupancy.c)
     target_link_libraries(test_occupancy PRIVATE va_core)

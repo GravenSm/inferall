@@ -11,6 +11,7 @@ typedef struct {
 
 int  capture_init(const capture_config_t *cfg);
 int  capture_frame(uint8_t *gray_out, uint16_t *depth_out, uint64_t *timestamp_us);
+int  capture_frame_stereo(uint8_t *left_out, uint8_t *right_out, uint64_t *timestamp_us);
 void capture_shutdown(void);
 
 #endif
