@@ -166,7 +166,9 @@ class Orchestrator:
         """Select the appropriate backend for the model format."""
         if fmt in _LLAMACPP_FORMATS:
             if self._llamacpp_backend is None:
-                self._llamacpp_backend = LlamaCppBackend()
+                self._llamacpp_backend = LlamaCppBackend(
+                    n_ctx=getattr(self.config, "gguf_n_ctx", 8192),
+                )
             return self._llamacpp_backend
         if fmt in _TRANSFORMERS_FORMATS:
             if self._transformers_backend is None:

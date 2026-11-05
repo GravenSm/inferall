@@ -52,6 +52,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from inferall.backends.tool_parsing import ToolCallStreamExtractor
 from inferall.backends.base import (
     EmbeddingParams,
     GenerationParams,
@@ -2194,30 +2195,64 @@ async def _stream_generator(
             })
         }
 
+        def _chunk(delta: dict) -> dict:
+            return {
+                "data": json.dumps({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_id,
+                    "choices": [{
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": None,
+                        "logprobs": None,
+                    }],
+                    "system_fingerprint": None,
+                })
+            }
+
+        # When tools are in play, backends still stream the model's text-format
+        # tool calls (e.g. Qwen's <tool_call>...</tool_call>); turn those into
+        # OpenAI tool_calls deltas instead of leaking the markup to the client.
+        extractor = ToolCallStreamExtractor() if params.tools else None
+        tool_call_count = 0
+
+        def _events(token: Optional[str]):
+            if extractor is None:
+                return [("content", token)] if token else []
+            return list(extractor.feed(token) if token is not None else extractor.flush())
+
+        def _event_chunk(kind: str, payload):
+            nonlocal tool_call_count
+            if kind == "tool_call":
+                idx = tool_call_count
+                tool_call_count += 1
+                return _chunk({"tool_calls": [{
+                    "index": idx,
+                    "id": payload.id,
+                    "type": payload.type,
+                    "function": {
+                        "name": payload.function_name,
+                        "arguments": payload.function_arguments,
+                    },
+                }]})
+            return _chunk({"content": payload})
+
         # Content chunks
         while True:
             try:
                 token = token_queue.get_nowait()
                 token_count += 1
-                yield {
-                    "data": json.dumps({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_id,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": token},
-                            "finish_reason": None,
-                            "logprobs": None,
-                        }],
-                        "system_fingerprint": None,
-                    })
-                }
+                for kind, payload in _events(token):
+                    yield _event_chunk(kind, payload)
             except queue.Empty:
                 if done_event.is_set() and token_queue.empty():
                     break
                 await asyncio.sleep(0.01)
+
+        for kind, payload in _events(None):
+            yield _event_chunk(kind, payload)
 
         # Check for errors
         if error_holder:
@@ -2259,7 +2294,7 @@ async def _stream_generator(
                     "choices": [{
                         "index": 0,
                         "delta": {},
-                        "finish_reason": "stop",
+                        "finish_reason": "tool_calls" if tool_call_count else "stop",
                         "logprobs": None,
                     }],
                     "usage": {
