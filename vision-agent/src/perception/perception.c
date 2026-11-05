@@ -1,12 +1,22 @@
 #include "perception/perception.h"
 #include <string.h>
+#include <stdint.h>
 
 int perception_init(void) {
     return 0;
 }
 
-void perception_extract(const frame_t *frame, uint8_t *detections) {
-    memset(detections, 0, VA_NUM_DETECTIONS);
+static uint16_t region_mean_mm(uint32_t sum, uint32_t count) {
+    if (count == 0) return VA_DEPTH_INVALID;
+    uint32_t mean = sum / count;
+    /* A valid region can never legitimately average 0 mm; keep it distinct
+     * from the VA_DEPTH_INVALID sentinel. */
+    if (mean == 0) mean = 1;
+    return mean > UINT16_MAX ? UINT16_MAX : (uint16_t)mean;
+}
+
+void perception_extract(const frame_t *frame, uint16_t *detections) {
+    memset(detections, 0, VA_NUM_DETECTIONS * sizeof(detections[0]));
 
     int center_x = VA_FRAME_W / 2;
     int center_y = VA_FRAME_H / 2;
@@ -33,15 +43,15 @@ void perception_extract(const frame_t *frame, uint8_t *detections) {
         }
     }
 
-    detections[0] = count_center > 0 ? (uint8_t)(sum_center / count_center / 10) : 255;
-    detections[1] = count_left   > 0 ? (uint8_t)(sum_left   / count_left   / 10) : 255;
-    detections[2] = count_right  > 0 ? (uint8_t)(sum_right  / count_right  / 10) : 255;
-    detections[3] = count_top    > 0 ? (uint8_t)(sum_top    / count_top    / 10) : 255;
+    detections[VA_DET_CENTER] = region_mean_mm(sum_center, count_center);
+    detections[VA_DET_LEFT]   = region_mean_mm(sum_left,   count_left);
+    detections[VA_DET_RIGHT]  = region_mean_mm(sum_right,  count_right);
+    detections[VA_DET_TOP]    = region_mean_mm(sum_top,    count_top);
 
     uint32_t avg_gray = 0;
     for (int i = 0; i < VA_FRAME_PIXELS; i++)
         avg_gray += frame->gray[i];
-    detections[4] = (uint8_t)(avg_gray / VA_FRAME_PIXELS);
+    detections[VA_DET_GRAY] = (uint16_t)(avg_gray / VA_FRAME_PIXELS);
 
     detections[5] = 0;
     detections[6] = 0;

@@ -5,7 +5,7 @@
 
 int  ipc_publisher_init(const char *shm_name, vision_state_t **state_out);
 void ipc_publish(vision_state_t *state, const frame_t *frame,
-                 const occupancy_grid_t *grid, const uint8_t *detections,
+                 const occupancy_grid_t *grid, const uint16_t *detections,
                  agent_state_t agent_state, const motor_cmd_t *cmd,
                  uint64_t frame_id);
 void ipc_publisher_shutdown(const char *shm_name, vision_state_t *state);

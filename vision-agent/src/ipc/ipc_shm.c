@@ -37,7 +37,7 @@ int ipc_publisher_init(const char *shm_name, vision_state_t **state_out) {
 }
 
 void ipc_publish(vision_state_t *state, const frame_t *frame,
-                 const occupancy_grid_t *grid, const uint8_t *detections,
+                 const occupancy_grid_t *grid, const uint16_t *detections,
                  agent_state_t agent_state, const motor_cmd_t *cmd,
                  uint64_t frame_id) {
     unsigned int seq = atomic_load(&state->seq);
@@ -50,7 +50,7 @@ void ipc_publish(vision_state_t *state, const frame_t *frame,
     state->last_cmd = *cmd;
 
     memcpy(state->occupancy, grid->cells, sizeof(grid->cells));
-    memcpy(state->detections, detections, VA_NUM_DETECTIONS);
+    memcpy(state->detections, detections, sizeof(state->detections));
     memcpy(state->gray, frame->gray, sizeof(frame->gray));
     memcpy(state->depth, frame->depth, sizeof(frame->depth));
 

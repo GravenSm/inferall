@@ -2,23 +2,39 @@
 #include "fusion/occupancy.h"
 #include <string.h>
 
-#define OBSTACLE_CLOSE_MM   30
-#define OBSTACLE_CLEAR_MM   50
-#define EMERGENCY_STOP_MM   10
-#define TARGET_LOST_TIMEOUT_US 2000000
+/* All distances are true millimetres (detections[] carries mm). */
+#define OBSTACLE_CLOSE_MM   300   /* EXPLORE -> AVOID when blocked within this range */
+#define OBSTACLE_CLEAR_MM   500   /* AVOID -> EXPLORE only once clear out to this range */
+#define EMERGENCY_STOP_MM   100
 #define CRUISE_SPEED        400
 #define AVOID_TURN_RATE     600
 #define OCCUPANCY_THRESHOLD 100
+#define BLOCKED_CELL_COUNT  4     /* more than this many occupied cells = blocked */
 
 void fsm_init(fsm_context_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->state = STATE_EXPLORE;
 }
 
+/* Number of depth cells (grid z) covered by distance_mm, clamped to the grid. */
+static int range_cells(const occupancy_grid_t *grid, int distance_mm) {
+    float cells = ((float)distance_mm * 0.001f) / grid->cell_size_m;
+    int n = (int)cells;
+    if ((float)n < cells) n++;           /* ceil */
+    if (n < 1) n = 1;
+    if (n > VA_GRID_Z) n = VA_GRID_Z;
+    return n;
+}
+
+/* Blocked if more than BLOCKED_CELL_COUNT occupied cells lie in the forward
+ * cone within distance_mm. Because the CLEAR range contains the CLOSE range,
+ * blocked(CLEAR) >= blocked(CLOSE) always holds, which is what gives the
+ * EXPLORE/AVOID transitions their hysteresis. */
 static int forward_blocked(const occupancy_grid_t *grid, int distance_mm) {
-    (void)distance_mm;
     int center = VA_GRID_X / 2;
-    return occupancy_check_cone(grid, center, center, 2, OCCUPANCY_THRESHOLD) > 4;
+    int max_z = range_cells(grid, distance_mm);
+    return occupancy_check_cone(grid, center, center, 2, max_z,
+                                OCCUPANCY_THRESHOLD) > BLOCKED_CELL_COUNT;
 }
 
 static int find_clear_direction(const occupancy_grid_t *grid) {
@@ -40,12 +56,15 @@ static int find_clear_direction(const occupancy_grid_t *grid) {
     return left_count <= right_count ? -1 : 1;
 }
 
-static int emergency_obstacle(const uint8_t *detections) {
-    return detections[0] < EMERGENCY_STOP_MM;
+/* No valid depth in the centre region means we are blind, which is treated
+ * exactly like an obstacle at point-blank range. */
+static int emergency_obstacle(const uint16_t *detections) {
+    uint16_t d = detections[VA_DET_CENTER];
+    return d == VA_DEPTH_INVALID || d < EMERGENCY_STOP_MM;
 }
 
 void fsm_step(fsm_context_t *ctx, const occupancy_grid_t *grid,
-              const uint8_t *detections, uint64_t now_us) {
+              const uint16_t *detections, uint64_t now_us) {
     if (emergency_obstacle(detections)) {
         if (ctx->state != STATE_STOP) {
             ctx->state = STATE_STOP;
@@ -56,10 +75,9 @@ void fsm_step(fsm_context_t *ctx, const occupancy_grid_t *grid,
 
     switch (ctx->state) {
     case STATE_STOP:
-        if (!emergency_obstacle(detections)) {
-            ctx->state = STATE_EXPLORE;
-            ctx->state_entered_us = now_us;
-        }
+        /* Emergency condition has cleared (checked above). */
+        ctx->state = STATE_EXPLORE;
+        ctx->state_entered_us = now_us;
         break;
 
     case STATE_EXPLORE:
@@ -74,17 +92,6 @@ void fsm_step(fsm_context_t *ctx, const occupancy_grid_t *grid,
         if (!forward_blocked(grid, OBSTACLE_CLEAR_MM)) {
             ctx->state = STATE_EXPLORE;
             ctx->state_entered_us = now_us;
-        }
-        break;
-
-    case STATE_TRACK:
-        if ((now_us - ctx->last_target_seen_us) > TARGET_LOST_TIMEOUT_US) {
-            ctx->state = STATE_EXPLORE;
-            ctx->state_entered_us = now_us;
-        } else if (forward_blocked(grid, OBSTACLE_CLOSE_MM)) {
-            ctx->state = STATE_AVOID;
-            ctx->state_entered_us = now_us;
-            ctx->avoid_direction = find_clear_direction(grid);
         }
         break;
     }
@@ -103,11 +110,6 @@ motor_cmd_t fsm_command(const fsm_context_t *ctx, const occupancy_grid_t *grid) 
     case STATE_AVOID:
         cmd.speed = CRUISE_SPEED / 4;
         cmd.turn = ctx->avoid_direction * AVOID_TURN_RATE;
-        break;
-
-    case STATE_TRACK:
-        cmd.speed = CRUISE_SPEED / 2;
-        cmd.turn = 0;
         break;
 
     case STATE_STOP:

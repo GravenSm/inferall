@@ -27,7 +27,6 @@ typedef struct {
 typedef enum {
     STATE_EXPLORE,
     STATE_AVOID,
-    STATE_TRACK,
     STATE_STOP
 } agent_state_t;
 
@@ -44,6 +43,17 @@ typedef struct {
 
 #define VA_NUM_DETECTIONS 8
 
+/* detections[0..3]: mean depth in millimetres of the centre / left / right /
+ * top image regions. VA_DEPTH_INVALID means the region had no valid depth
+ * pixels (sensor fault, occlusion, saturation) and must be treated as unsafe,
+ * never as "far away". detections[4]: mean grey level (0-255). */
+#define VA_DEPTH_INVALID 0
+#define VA_DET_CENTER 0
+#define VA_DET_LEFT   1
+#define VA_DET_RIGHT  2
+#define VA_DET_TOP    3
+#define VA_DET_GRAY   4
+
 typedef struct {
     uint64_t      frame_id;
     uint64_t      timestamp_us;
@@ -53,14 +63,14 @@ typedef struct {
     motor_cmd_t   last_cmd;
 
     uint8_t       occupancy[VA_GRID_X][VA_GRID_Y][VA_GRID_Z];
-    uint8_t       detections[VA_NUM_DETECTIONS];
+    uint16_t      detections[VA_NUM_DETECTIONS];
     uint8_t       gray[VA_FRAME_PIXELS];
     uint16_t      depth[VA_FRAME_PIXELS];
 
     atomic_uint   seq;
 } vision_state_t;
 
-#define VA_IPC_VERSION 1
+#define VA_IPC_VERSION 2
 #define VA_SHM_NAME "/vision_agent"
 
 #endif

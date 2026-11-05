@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <time.h>
 
 vision_state_t *ipc_client_connect(const char *shm_name) {
     int fd = shm_open(shm_name, O_RDONLY, 0);
@@ -25,8 +26,21 @@ vision_state_t *ipc_client_connect(const char *shm_name) {
     return (vision_state_t *)ptr;
 }
 
+/* A publish copies ~12 KB, which takes several microseconds; back off between
+ * attempts so the retries actually span a write instead of all landing inside
+ * the same one. Worst case this blocks for IPC_READ_ATTEMPTS * IPC_READ_BACKOFF. */
+#define IPC_READ_ATTEMPTS   64
+#define IPC_READ_BACKOFF_NS 20000   /* 20 us */
+
+static void read_backoff(void) {
+    struct timespec ts = { 0, IPC_READ_BACKOFF_NS };
+    nanosleep(&ts, NULL);
+}
+
 bool ipc_client_read(const vision_state_t *shm, vision_state_t *local) {
-    for (int attempt = 0; attempt < 4; attempt++) {
+    for (int attempt = 0; attempt < IPC_READ_ATTEMPTS; attempt++) {
+        if (attempt > 0) read_backoff();
+
         unsigned int seq1 = atomic_load(&((vision_state_t *)shm)->seq);
         if (seq1 & 1) continue;
 
