@@ -535,3 +535,204 @@ class TestStreamingToolCallsAPI:
         assert content == QWEN_CALL
         assert not any("tool_calls" in c["choices"][0]["delta"] for c in chunks)
         assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+# =============================================================================
+# Review follow-ups
+# =============================================================================
+
+class TestMistralNestedArguments:
+    def test_nested_array_in_arguments_and_id_preserved(self):
+        text = ('[TOOL_CALLS] [{"name":"lookup","arguments":{"ids":[1,2]},'
+                '"id":"abc123xyz"}]')
+        calls, remaining = parse_tool_calls(text)
+        assert calls is not None and len(calls) == 1
+        assert calls[0].function_name == "lookup"
+        assert calls[0].id == "abc123xyz"
+        assert json.loads(calls[0].function_arguments) == {"ids": [1, 2]}
+        assert remaining == ""
+
+    def test_text_around_mistral_call(self):
+        text = 'Sure. [TOOL_CALLS] [{"name":"f","arguments":{"a":[[1],[2]]}}] done'
+        calls, remaining = parse_tool_calls(text)
+        assert json.loads(calls[0].function_arguments) == {"a": [[1], [2]]}
+        assert remaining.split() == ["Sure.", "done"]
+
+    def test_truncated_mistral_array_is_left_as_text(self):
+        text = '[TOOL_CALLS] [{"name":"f","arguments":{"a":[1,2'
+        calls, remaining = parse_tool_calls(text)
+        assert calls is None
+        assert remaining == text
+
+
+class TestLlamaCppNativeStreamingToolCalls:
+    """tool_choice naming a function: llama-cpp-python streams native deltas."""
+
+    def setup_method(self):
+        from inferall.backends.llamacpp_backend import LlamaCppBackend
+        self.backend = LlamaCppBackend()
+        self.messages = [{"role": "user", "content": "Weather in London?"}]
+        self.params = GenerationParams(
+            tools=[WEATHER_TOOL],
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        )
+
+    @staticmethod
+    def _native_stream(fragments, name="get_weather"):
+        chunks = [{"choices": [{"delta": {"role": "assistant", "content": None,
+                                           "tool_calls": None}}]}]
+        for i, frag in enumerate(fragments):
+            chunks.append({"choices": [{"delta": {
+                "content": None,
+                "tool_calls": [{"index": 0, "id": "call_native",
+                                "type": "function",
+                                "function": {"name": name if i == 0 else None,
+                                             "arguments": frag}}],
+            }}]})
+        loaded = MagicMock()
+        loaded.model.create_chat_completion.return_value = iter(chunks)
+        return loaded
+
+    def test_fragmented_native_arguments_are_assembled(self):
+        loaded = self._native_stream(['{"ci', 'ty": "Lo', 'ndon"}'])
+        out = "".join(self.backend.stream(loaded, self.messages, self.params))
+        ex = ToolCallStreamExtractor()
+        events = list(ex.feed(out)) + list(ex.flush())
+        assert [k for k, _ in events] == ["tool_call"]
+        call = events[0][1]
+        assert call.function_name == "get_weather"
+        assert json.loads(call.function_arguments) == {"city": "London"}
+
+    def test_truncated_native_arguments_not_dropped(self):
+        loaded = self._native_stream(['{"city": "Lon'])
+        out = "".join(self.backend.stream(loaded, self.messages, self.params))
+        ex = ToolCallStreamExtractor()
+        events = list(ex.feed(out)) + list(ex.flush())
+        assert [k for k, _ in events] == ["tool_call"]
+        call = events[0][1]
+        assert call.function_name == "get_weather"
+        # Unparseable fragment is carried through verbatim as the arguments string.
+        assert call.function_arguments == '{"city": "Lon'
+
+    def test_native_stream_end_to_end_through_api(self):
+        # The assembled text must come out of the API as a tool_calls delta.
+        loaded = self._native_stream(['{"city": ', '"Oslo"}'])
+        tokens = list(self.backend.stream(loaded, self.messages, self.params))
+
+        from inferall.api.server import create_app
+        from inferall.orchestrator import Orchestrator
+        from inferall.registry.registry import ModelRegistry
+        from starlette.testclient import TestClient
+        orch = MagicMock(spec=Orchestrator)
+        orch.list_loaded.return_value = []
+        orch.stream.return_value = iter(tokens)
+        registry = MagicMock(spec=ModelRegistry)
+        registry.list_all.return_value = []
+        client = TestClient(create_app(orchestrator=orch, registry=registry, api_key=None))
+        resp = client.post("/v1/chat/completions", json={
+            "model": "m", "stream": True,
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [WEATHER_TOOL],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+        })
+        chunks = _sse_chunks(resp.text)
+        tc = [d["tool_calls"][0] for d in (c["choices"][0]["delta"] for c in chunks)
+              if "tool_calls" in d]
+        assert len(tc) == 1 and tc[0]["function"]["name"] == "get_weather"
+        assert json.loads(tc[0]["function"]["arguments"]) == {"city": "Oslo"}
+        assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+class TestStreamingToolChoiceNone(TestStreamingToolCallsAPI):
+    def test_tool_choice_none_disables_extraction(self, client):
+        client._orch.stream.return_value = iter(_split(QWEN_CALL, 5))
+        resp = client.post("/v1/chat/completions", json={
+            "model": "test/model",
+            "messages": [{"role": "user", "content": "x"}],
+            "stream": True,
+            "tools": [WEATHER_TOOL],
+            "tool_choice": "none",
+        })
+        chunks = _sse_chunks(resp.text)
+        content = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+        assert content == QWEN_CALL
+        assert not any("tool_calls" in c["choices"][0]["delta"] for c in chunks)
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+class TestAllocationContextLength:
+    def test_heuristic_kv_estimate_scales_with_context(self):
+        from inferall.gpu.allocator import GPUAllocator
+        from inferall.registry.metadata import ModelFormat
+        allocator = GPUAllocator(MagicMock(), vram_buffer_mb=0)
+        record = MagicMock(model_id="x/y", param_count=1_000_000_000,
+                           format=ModelFormat.GGUF, file_size_bytes=0)
+        record.local_path = MagicMock()
+        record.local_path.__truediv__ = lambda self, other: MagicMock(exists=lambda: False)
+        base = allocator._estimate_vram(record, 4096)
+        bigger = allocator._estimate_vram(record, 32768)
+        assert bigger > base
+
+    def test_orchestrator_plans_gguf_allocation_with_configured_ctx(self):
+        from datetime import datetime
+        from pathlib import Path
+        from unittest.mock import patch
+        from inferall.config import EngineConfig
+        from inferall.gpu.allocator import AllocationPlan, GPUAllocator
+        from inferall.gpu.manager import GPUManager
+        from inferall.orchestrator import Orchestrator
+        from inferall.registry.metadata import ModelFormat, ModelRecord, ModelTask
+        from inferall.registry.registry import ModelRegistry
+
+        record = ModelRecord(
+            model_id="org/model-GGUF", revision="abc123", format=ModelFormat.GGUF,
+            local_path=Path("/tmp/x"), file_size_bytes=1, param_count=1_000_000_000,
+            gguf_variant="Q4_K_M", trust_remote_code=False,
+            pipeline_tag="text-generation", pulled_at=datetime.now(), task=ModelTask.CHAT,
+        )
+        registry = MagicMock(spec=ModelRegistry)
+        registry.get.return_value = record
+        allocator = MagicMock(spec=GPUAllocator)
+        allocator.compute_allocation.return_value = AllocationPlan(
+            gpu_ids=[0], estimated_vram_bytes=1,
+        )
+        gpu_manager = MagicMock(spec=GPUManager)
+        gpu_manager.gpu_assignments = {}
+
+        orch = Orchestrator(EngineConfig(idle_timeout=0, gguf_n_ctx=16384),
+                            registry, gpu_manager, allocator)
+        with patch.object(orch, "_get_backend") as backend:
+            backend.return_value.load.return_value = MagicMock(model_id=record.model_id)
+            orch.get_or_load(record.model_id)
+        allocator.compute_allocation.assert_called_once_with(record, max_seq_len=16384)
+
+    def test_orchestrator_keeps_default_when_ctx_is_model_length(self):
+        from datetime import datetime
+        from pathlib import Path
+        from unittest.mock import patch
+        from inferall.config import EngineConfig
+        from inferall.gpu.allocator import AllocationPlan, GPUAllocator
+        from inferall.gpu.manager import GPUManager
+        from inferall.orchestrator import Orchestrator
+        from inferall.registry.metadata import ModelFormat, ModelRecord, ModelTask
+        from inferall.registry.registry import ModelRegistry
+
+        record = ModelRecord(
+            model_id="org/model-GGUF", revision="abc123", format=ModelFormat.GGUF,
+            local_path=Path("/tmp/x"), file_size_bytes=1, param_count=1_000_000_000,
+            gguf_variant="Q4_K_M", trust_remote_code=False,
+            pipeline_tag="text-generation", pulled_at=datetime.now(), task=ModelTask.CHAT,
+        )
+        registry = MagicMock(spec=ModelRegistry)
+        registry.get.return_value = record
+        allocator = MagicMock(spec=GPUAllocator)
+        allocator.compute_allocation.return_value = AllocationPlan(gpu_ids=[0], estimated_vram_bytes=1)
+        gpu_manager = MagicMock(spec=GPUManager)
+        gpu_manager.gpu_assignments = {}
+
+        orch = Orchestrator(EngineConfig(idle_timeout=0, gguf_n_ctx=0),
+                            registry, gpu_manager, allocator)
+        with patch.object(orch, "_get_backend") as backend:
+            backend.return_value.load.return_value = MagicMock(model_id=record.model_id)
+            orch.get_or_load(record.model_id)
+        allocator.compute_allocation.assert_called_once_with(record)

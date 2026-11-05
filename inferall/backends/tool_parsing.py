@@ -24,8 +24,10 @@ from inferall.backends.base import ToolCall
 
 # Qwen / Hermes format
 _QWEN_PATTERN = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-# Mistral format
-_MISTRAL_PATTERN = re.compile(r"\[TOOL_CALLS\]\s*(\[.*?\])", re.DOTALL)
+# Mistral format: the JSON array that follows is decoded with raw_decode so
+# nested arrays/objects inside arguments do not cut the match short.
+_MISTRAL_PATTERN = re.compile(r"\[TOOL_CALLS\]\s*(?=\[)")
+_JSON_DECODER = json.JSONDecoder()
 # Llama 3.1 format
 _LLAMA_PATTERN = re.compile(r"<function=(\w+)>(.*?)</function>", re.DOTALL)
 # Bare JSON object with name + arguments/parameters
@@ -78,12 +80,14 @@ def parse_tool_calls(text: str) -> Tuple[Optional[List[ToolCall]], str]:
     match = _MISTRAL_PATTERN.search(text)
     if match:
         try:
-            calls = json.loads(match.group(1))
-            for call in calls:
-                tool_calls.append(_make_call(
-                    call.get("name", ""), call.get("arguments", {}), call.get("id"),
-                ))
-            return tool_calls, text[:match.start()].strip()
+            calls, end = _JSON_DECODER.raw_decode(text, match.end())
+            if isinstance(calls, list):
+                for call in calls:
+                    tool_calls.append(_make_call(
+                        call.get("name", ""), call.get("arguments", {}), call.get("id"),
+                    ))
+                remaining = (text[:match.start()] + text[end:]).strip()
+                return tool_calls, remaining
         except (json.JSONDecodeError, AttributeError):
             pass
 

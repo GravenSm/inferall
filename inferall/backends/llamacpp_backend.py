@@ -13,6 +13,7 @@ Features:
   the usual ``tool_choice="auto"`` case the reply text is parsed here.
 """
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -26,6 +27,8 @@ from inferall.backends.base import (
     ToolCall,
 )
 from inferall.backends.tool_parsing import (
+    TOOL_CALL_CLOSE,
+    TOOL_CALL_OPEN,
     ThinkingStreamFilter,
     normalize_tool_call_messages,
     parse_tool_calls,
@@ -226,6 +229,12 @@ class LlamaCppBackend(BaseBackend):
         stream = loaded.model.create_chat_completion(stream=True, **kwargs)
         think_filter = ThinkingStreamFilter()
 
+        # When tool_choice names a function, llama-cpp-python streams the
+        # grammar-constrained arguments as native delta.tool_calls fragments
+        # (content is None). Collect them and emit the finished call in the
+        # same text form the API layer already extracts.
+        native_calls: dict = {}
+
         for chunk in stream:
             if cancel is not None and cancel.is_set():
                 break
@@ -239,10 +248,29 @@ class LlamaCppBackend(BaseBackend):
                 out = think_filter.feed(content)
                 if out:
                     yield out
+            for frag in delta.get("tool_calls") or []:
+                idx = frag.get("index", 0)
+                entry = native_calls.setdefault(idx, {"name": "", "arguments": ""})
+                fn = frag.get("function") or {}
+                if fn.get("name"):
+                    entry["name"] = fn["name"]
+                entry["arguments"] += fn.get("arguments") or ""
 
         tail = think_filter.flush()
         if tail:
             yield tail
+
+        for idx in sorted(native_calls):
+            entry = native_calls[idx]
+            try:
+                args = json.loads(entry["arguments"]) if entry["arguments"].strip() else {}
+            except json.JSONDecodeError:
+                # Cut off mid-arguments (max_tokens); pass the fragment on
+                # verbatim rather than silently dropping the call.
+                args = entry["arguments"]
+            yield (f"{TOOL_CALL_OPEN}"
+                   f"{json.dumps({'name': entry['name'], 'arguments': args})}"
+                   f"{TOOL_CALL_CLOSE}")
 
     # -------------------------------------------------------------------------
     # Unload

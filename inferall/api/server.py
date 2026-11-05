@@ -2215,7 +2215,8 @@ async def _stream_generator(
         # When tools are in play, backends still stream the model's text-format
         # tool calls (e.g. Qwen's <tool_call>...</tool_call>); turn those into
         # OpenAI tool_calls deltas instead of leaking the markup to the client.
-        extractor = ToolCallStreamExtractor() if params.tools else None
+        tools_enabled = bool(params.tools) and params.tool_choice != "none"
+        extractor = ToolCallStreamExtractor() if tools_enabled else None
         tool_call_count = 0
 
         def _events(token: Optional[str]):

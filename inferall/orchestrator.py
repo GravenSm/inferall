@@ -334,7 +334,15 @@ class Orchestrator:
 
             # Compute allocation
             backend = self._get_backend_for_record(record)
-            allocation = self.allocator.compute_allocation(record)
+            alloc_kwargs = {}
+            if record.format in _LLAMACPP_FORMATS:
+                # Plan the KV cache for the context llama.cpp will actually
+                # allocate. 0 (= model's trained length) is unknown without
+                # reading the GGUF header, so keep the allocator's default.
+                n_ctx = getattr(self.config, "gguf_n_ctx", 0)
+                if n_ctx and n_ctx > 0:
+                    alloc_kwargs["max_seq_len"] = n_ctx
+            allocation = self.allocator.compute_allocation(record, **alloc_kwargs)
 
             # Load the model (slow — no locks held)
             logger.info("Loading model: %s (backend=%s)", model_id, backend.name)
