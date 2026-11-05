@@ -152,6 +152,28 @@ static int test_update_floor_indexing(void) {
     return 0;
 }
 
+/* A wall at 450 mm (inside the FSM's 500 mm CLEAR range) must be stored. */
+static int test_update_450mm_lands_in_grid(void) {
+    occupancy_grid_t grid;
+    occupancy_init(&grid, VA_CELL_SIZE_MM * 0.001f);
+    camera_intrinsics_t intr = { .fx = 38.6f, .fy = 38.6f, .cx = 32.0f, .cy = 24.0f };
+
+    frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.width = VA_FRAME_W;
+    frame.height = VA_FRAME_H;
+    frame.depth[(VA_FRAME_H / 2) * VA_FRAME_W + (VA_FRAME_W / 2)] = 450;
+    occupancy_update(&grid, &frame, &intr);
+
+    int c = VA_GRID_X / 2;
+    int want_z = 450 / VA_CELL_SIZE_MM;   /* 9 */
+    if (grid.cells[c][c][want_z] == 0) {
+        fprintf(stderr, "FAIL: 450 mm point not stored at z=%d (grid too shallow?)\n", want_z);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_check_cone_max_z(void) {
     occupancy_grid_t grid;
     occupancy_init(&grid, 0.05f);
@@ -184,6 +206,7 @@ int main(void) {
         {"check_cone",           test_check_cone},
         {"update_floor_indexing", test_update_floor_indexing},
         {"check_cone_max_z",     test_check_cone_max_z},
+        {"update_450mm_lands_in_grid", test_update_450mm_lands_in_grid},
     };
     int n = sizeof(tests) / sizeof(tests[0]);
     for (int i = 0; i < n; i++) {

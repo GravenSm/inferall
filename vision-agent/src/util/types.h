@@ -14,7 +14,11 @@
 
 #define VA_GRID_X 16
 #define VA_GRID_Y 16
-#define VA_GRID_Z 8
+/* Depth layers. The grid must reach at least as far as the FSM's largest
+ * range check (OBSTACLE_CLEAR_MM in fsm.c), which is enforced there with a
+ * static assertion. 12 * 50 mm = 600 mm. */
+#define VA_GRID_Z 12
+#define VA_CELL_SIZE_MM 50
 
 typedef struct {
     uint8_t  gray[VA_FRAME_PIXELS];

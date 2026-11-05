@@ -209,6 +209,49 @@ static int test_avoid_hysteresis(void) {
     return 0;
 }
 
+/* Regression: a wall at 450 mm is inside the 500 mm CLEAR range, so AVOID
+ * must stay latched once the nearer obstacle clears. With an 8-layer grid
+ * this wall was discarded and the robot resumed full-speed EXPLORE. */
+static int test_avoid_latches_at_450mm(void) {
+    fsm_context_t ctx;
+    fsm_init(&ctx);
+    occupancy_grid_t grid;
+    occupancy_init(&grid, VA_CELL_SIZE_MM * 0.001f);
+
+    uint16_t detections[VA_NUM_DETECTIONS] = {0};
+    detections[0] = 2000;
+    int c = VA_GRID_X / 2;
+    int z_450 = 450 / VA_CELL_SIZE_MM;
+
+    /* Near obstacle plus a wall at 450 mm: enters AVOID. */
+    for (int dx = -2; dx <= 2; dx++)
+        for (int dy = -2; dy <= 2; dy++) {
+            grid.cells[c + dx][c + dy][2] = 200;
+            grid.cells[c + dx][c + dy][z_450] = 200;
+        }
+    fsm_step(&ctx, &grid, detections, 1000000);
+    if (ctx.state != STATE_AVOID) {
+        fprintf(stderr, "FAIL: expected AVOID, got %d\n", ctx.state);
+        return 1;
+    }
+
+    /* Near obstacle gone, 450 mm wall remains: must stay in AVOID. */
+    for (int dx = -2; dx <= 2; dx++)
+        for (int dy = -2; dy <= 2; dy++)
+            grid.cells[c + dx][c + dy][2] = 0;
+    fsm_step(&ctx, &grid, detections, 2000000);
+    if (ctx.state != STATE_AVOID) {
+        fprintf(stderr, "FAIL: 450 mm wall should keep AVOID latched, got %d\n", ctx.state);
+        return 1;
+    }
+    motor_cmd_t cmd = fsm_command(&ctx, &grid);
+    if (cmd.speed >= 400) {
+        fprintf(stderr, "FAIL: must not be at cruise speed with a wall at 450 mm\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     int failures = 0;
     struct { const char *name; int (*fn)(void); } tests[] = {
@@ -220,6 +263,7 @@ int main(void) {
         {"far_depth_is_not_emergency", test_far_depth_is_not_emergency},
         {"blind_sensor_stops",         test_blind_sensor_stops},
         {"avoid_hysteresis",           test_avoid_hysteresis},
+        {"avoid_latches_at_450mm",     test_avoid_latches_at_450mm},
     };
     int n = sizeof(tests) / sizeof(tests[0]);
     for (int i = 0; i < n; i++) {

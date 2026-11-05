@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
     if (!dry_run && motor_init() != 0) { VA_ERR("motor init failed"); return 1; }
 
     occupancy_grid_t grid;
-    occupancy_init(&grid, 0.05f);
+    occupancy_init(&grid, VA_CELL_SIZE_MM * 0.001f);
 
     /* RealSense D435 defaults at 640x480, scaled to the preprocessed frame
      * size (cx/cy and fx/fy must all be scaled by the same factor). */

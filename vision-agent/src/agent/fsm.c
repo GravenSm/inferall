@@ -11,6 +11,13 @@
 #define OCCUPANCY_THRESHOLD 100
 #define BLOCKED_CELL_COUNT  4     /* more than this many occupied cells = blocked */
 
+/* occupancy_update discards points beyond the grid, so a range check longer
+ * than the grid would be silently shortened to the grid depth. */
+_Static_assert(OBSTACLE_CLEAR_MM <= VA_GRID_Z * VA_CELL_SIZE_MM,
+               "occupancy grid is shallower than OBSTACLE_CLEAR_MM");
+_Static_assert(OBSTACLE_CLOSE_MM < OBSTACLE_CLEAR_MM,
+               "hysteresis requires CLOSE < CLEAR");
+
 void fsm_init(fsm_context_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->state = STATE_EXPLORE;
