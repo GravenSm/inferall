@@ -27,7 +27,7 @@ static int test_update_projects_depth(void) {
     occupancy_grid_t grid;
     occupancy_init(&grid, 0.05f);
 
-    camera_intrinsics_t intr = { .fx = 386.0f, .fy = 386.0f, .cx = 32.0f, .cy = 24.0f };
+    camera_intrinsics_t intr = { .fx = 38.6f, .fy = 38.6f, .cx = 32.0f, .cy = 24.0f };
 
     frame_t frame;
     memset(&frame, 0, sizeof(frame));
@@ -96,15 +96,101 @@ static int test_check_cone(void) {
     grid.cells[8][8][1] = 200;
     grid.cells[7][8][0] = 200;
 
-    int count = occupancy_check_cone(&grid, 8, 8, 1, 100);
+    int count = occupancy_check_cone(&grid, 8, 8, 1, VA_GRID_Z, 100);
     if (count != 3) {
         fprintf(stderr, "FAIL: expected 3 occupied, got %d\n", count);
         return 1;
     }
 
-    count = occupancy_check_cone(&grid, 0, 0, 1, 100);
+    count = occupancy_check_cone(&grid, 0, 0, 1, VA_GRID_Z, 100);
     if (count != 0) {
         fprintf(stderr, "FAIL: expected 0 at origin, got %d\n", count);
+        return 1;
+    }
+    return 0;
+}
+
+/* Pixels just left and just right of the principal point must land in
+ * different grid columns: truncation toward zero would merge them. */
+static int test_update_floor_indexing(void) {
+    occupancy_grid_t grid;
+    camera_intrinsics_t intr = { .fx = 38.6f, .fy = 38.6f, .cx = 32.0f, .cy = 24.0f };
+    int half = VA_GRID_X / 2;
+    int cy = VA_FRAME_H / 2;
+
+    /* depth 300 mm, offset 4 px -> x = 4 * 0.3 / 38.6 = 0.031 m, i.e. 0.62 cells */
+    frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.width = VA_FRAME_W;
+    frame.height = VA_FRAME_H;
+    frame.depth[cy * VA_FRAME_W + (32 - 4)] = 300;
+    occupancy_init(&grid, 0.05f);
+    occupancy_update(&grid, &frame, &intr);
+
+    int left_col = -1;
+    for (int x = 0; x < VA_GRID_X; x++)
+        for (int y = 0; y < VA_GRID_Y; y++)
+            for (int z = 0; z < VA_GRID_Z; z++)
+                if (grid.cells[x][y][z] > 0) left_col = x;
+
+    memset(&frame.depth, 0, sizeof(frame.depth));
+    frame.depth[cy * VA_FRAME_W + (32 + 4)] = 300;
+    occupancy_init(&grid, 0.05f);
+    occupancy_update(&grid, &frame, &intr);
+
+    int right_col = -1;
+    for (int x = 0; x < VA_GRID_X; x++)
+        for (int y = 0; y < VA_GRID_Y; y++)
+            for (int z = 0; z < VA_GRID_Z; z++)
+                if (grid.cells[x][y][z] > 0) right_col = x;
+
+    if (left_col != half - 1 || right_col != half) {
+        fprintf(stderr, "FAIL: left px -> col %d (want %d), right px -> col %d (want %d)\n",
+                left_col, half - 1, right_col, half);
+        return 1;
+    }
+    return 0;
+}
+
+/* A wall at 450 mm (inside the FSM's 500 mm CLEAR range) must be stored. */
+static int test_update_450mm_lands_in_grid(void) {
+    occupancy_grid_t grid;
+    occupancy_init(&grid, VA_CELL_SIZE_MM * 0.001f);
+    camera_intrinsics_t intr = { .fx = 38.6f, .fy = 38.6f, .cx = 32.0f, .cy = 24.0f };
+
+    frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.width = VA_FRAME_W;
+    frame.height = VA_FRAME_H;
+    frame.depth[(VA_FRAME_H / 2) * VA_FRAME_W + (VA_FRAME_W / 2)] = 450;
+    occupancy_update(&grid, &frame, &intr);
+
+    int c = VA_GRID_X / 2;
+    int want_z = 450 / VA_CELL_SIZE_MM;   /* 9 */
+    if (grid.cells[c][c][want_z] == 0) {
+        fprintf(stderr, "FAIL: 450 mm point not stored at z=%d (grid too shallow?)\n", want_z);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_check_cone_max_z(void) {
+    occupancy_grid_t grid;
+    occupancy_init(&grid, 0.05f);
+
+    grid.cells[8][8][1] = 200;
+    grid.cells[8][8][5] = 200;
+
+    if (occupancy_check_cone(&grid, 8, 8, 0, 2, 100) != 1) {
+        fprintf(stderr, "FAIL: max_z=2 should see only the near cell\n");
+        return 1;
+    }
+    if (occupancy_check_cone(&grid, 8, 8, 0, VA_GRID_Z, 100) != 2) {
+        fprintf(stderr, "FAIL: full depth should see both cells\n");
+        return 1;
+    }
+    if (occupancy_check_cone(&grid, 8, 8, 0, VA_GRID_Z + 10, 100) != 2) {
+        fprintf(stderr, "FAIL: oversized max_z must be clamped\n");
         return 1;
     }
     return 0;
@@ -118,6 +204,9 @@ int main(void) {
         {"decay_reduces_values", test_decay_reduces_values},
         {"decay_clamps_to_zero", test_decay_clamps_to_zero},
         {"check_cone",           test_check_cone},
+        {"update_floor_indexing", test_update_floor_indexing},
+        {"check_cone_max_z",     test_check_cone_max_z},
+        {"update_450mm_lands_in_grid", test_update_450mm_lands_in_grid},
     };
     int n = sizeof(tests) / sizeof(tests[0]);
     for (int i = 0; i < n; i++) {

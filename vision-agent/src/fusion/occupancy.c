@@ -1,6 +1,13 @@
 #include "fusion/occupancy.h"
 #include <string.h>
 
+/* floor() without libm: truncation toward zero would merge the (-1, 1) cell
+ * interval into a single double-width centre cell. */
+static int floor_to_int(float v) {
+    int i = (int)v;
+    return ((float)i > v) ? i - 1 : i;
+}
+
 void occupancy_init(occupancy_grid_t *grid, float cell_size_m) {
     memset(grid->cells, 0, sizeof(grid->cells));
     grid->cell_size_m = cell_size_m;
@@ -27,9 +34,9 @@ void occupancy_update(occupancy_grid_t *grid, const frame_t *frame,
             float x = (px - intrinsics->cx) * z * inv_fx;
             float y = (py - intrinsics->cy) * z * inv_fy;
 
-            int gx = (int)(x * cell_inv) + half_gx;
-            int gy = (int)(y * cell_inv) + half_gy;
-            int gz = (int)(z * cell_inv);
+            int gx = floor_to_int(x * cell_inv) + half_gx;
+            int gy = floor_to_int(y * cell_inv) + half_gy;
+            int gz = floor_to_int(z * cell_inv);
 
             if (gx < 0 || gx >= VA_GRID_X) continue;
             if (gy < 0 || gy >= VA_GRID_Y) continue;
@@ -53,15 +60,16 @@ void occupancy_decay(occupancy_grid_t *grid, uint8_t decay_amount) {
 
 int occupancy_check_cone(const occupancy_grid_t *grid,
                          int center_x, int center_y,
-                         int radius, int threshold) {
+                         int radius, int max_z, int threshold) {
     int count = 0;
+    if (max_z > VA_GRID_Z) max_z = VA_GRID_Z;
     for (int dx = -radius; dx <= radius; dx++) {
         for (int dy = -radius; dy <= radius; dy++) {
             int gx = center_x + dx;
             int gy = center_y + dy;
             if (gx < 0 || gx >= VA_GRID_X) continue;
             if (gy < 0 || gy >= VA_GRID_Y) continue;
-            for (int gz = 0; gz < VA_GRID_Z; gz++) {
+            for (int gz = 0; gz < max_z; gz++) {
                 if (grid->cells[gx][gy][gz] >= (uint8_t)threshold)
                     count++;
             }

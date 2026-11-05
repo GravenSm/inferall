@@ -48,9 +48,16 @@ int main(int argc, char **argv) {
     if (!dry_run && motor_init() != 0) { VA_ERR("motor init failed"); return 1; }
 
     occupancy_grid_t grid;
-    occupancy_init(&grid, 0.05f);
+    occupancy_init(&grid, VA_CELL_SIZE_MM * 0.001f);
 
-    camera_intrinsics_t intrinsics = { .fx = 386.0f, .fy = 386.0f, .cx = 32.0f, .cy = 24.0f };
+    /* RealSense D435 defaults at 640x480, scaled to the preprocessed frame
+     * size (cx/cy and fx/fy must all be scaled by the same factor). */
+    const float kx = (float)VA_FRAME_W / (float)VA_SRC_W;
+    const float ky = (float)VA_FRAME_H / (float)VA_SRC_H;
+    camera_intrinsics_t intrinsics = {
+        .fx = 386.0f * kx, .fy = 386.0f * ky,
+        .cx = 320.0f * kx, .cy = 240.0f * ky,
+    };
 
     fsm_context_t fsm;
     fsm_init(&fsm);
@@ -64,7 +71,7 @@ int main(int argc, char **argv) {
     if (!raw_gray || !raw_depth) { VA_ERR("alloc failed"); return 1; }
 
     frame_t frame;
-    uint8_t detections[VA_NUM_DETECTIONS];
+    uint16_t detections[VA_NUM_DETECTIONS];
     uint64_t frame_id = 0;
 
     uint64_t total_capture_us = 0, total_preprocess_us = 0;
@@ -79,7 +86,12 @@ int main(int argc, char **argv) {
         uint64_t t0 = timing_now_us();
 
         uint64_t ts;
-        capture_frame(raw_gray, raw_depth, &ts);
+        if (capture_frame(raw_gray, raw_depth, &ts) != 0) {
+            /* Never drive on stale or uninitialised buffers. */
+            VA_WARN("capture failed, stopping motors and skipping frame");
+            if (!dry_run) motor_stop();
+            continue;
+        }
         uint64_t t1 = timing_now_us();
 
         preprocess_frame(raw_gray, raw_depth, VA_SRC_W, VA_SRC_H, &frame);

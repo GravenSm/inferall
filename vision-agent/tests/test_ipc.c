@@ -25,7 +25,7 @@ static int test_publish_and_read(void) {
     memset(&grid, 0, sizeof(grid));
     grid.cells[5][5][2] = 100;
 
-    uint8_t detections[VA_NUM_DETECTIONS] = {10, 20, 30, 40, 50, 60, 70, 80};
+    uint16_t detections[VA_NUM_DETECTIONS] = {10, 20, 30, 40, 50, 60, 7000, 8000};
     motor_cmd_t cmd = {200, -100};
 
     ipc_publish(pub, &frame, &grid, detections, STATE_EXPLORE, &cmd, 7);
@@ -74,7 +74,7 @@ static int test_publish_and_read(void) {
         fprintf(stderr, "FAIL: occupancy[5][5][2] = %d\n", local.occupancy[5][5][2]);
         fail = 1;
     }
-    if (local.detections[0] != 10 || local.detections[7] != 80) {
+    if (local.detections[0] != 10 || local.detections[7] != 8000) {
         fprintf(stderr, "FAIL: detections\n");
         fail = 1;
     }
@@ -95,7 +95,7 @@ static int test_seqlock_consistency(void) {
 
     occupancy_grid_t grid;
     memset(&grid, 0, sizeof(grid));
-    uint8_t det[VA_NUM_DETECTIONS] = {0};
+    uint16_t det[VA_NUM_DETECTIONS] = {0};
     motor_cmd_t cmd = {0, 0};
 
     for (uint64_t i = 0; i < 100; i++) {
