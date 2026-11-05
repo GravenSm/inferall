@@ -5,13 +5,17 @@ Handles GGUF model files via llama-cpp-python.
 
 Features:
 - Multi-GPU via tensor_split
-- Built-in chat template support
+- Built-in chat template support (the Jinja template embedded in the GGUF)
 - Streaming via create_chat_completion(stream=True)
+- Tool calling for models that emit text-format tool calls (Qwen 2.5/3,
+  Hermes, Llama 3.1, Mistral): llama-cpp-python only returns structured
+  ``tool_calls`` when ``tool_choice`` names one specific function, so for
+  the usual ``tool_choice="auto"`` case the reply text is parsed here.
 """
 
+import json
 import logging
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator, List, Optional
 
@@ -20,15 +24,32 @@ from inferall.backends.base import (
     GenerationParams,
     GenerationResult,
     LoadedModel,
+    ToolCall,
+)
+from inferall.backends.tool_parsing import (
+    TOOL_CALL_CLOSE,
+    TOOL_CALL_OPEN,
+    ThinkingStreamFilter,
+    normalize_tool_call_messages,
+    parse_tool_calls,
+    strip_thinking,
 )
 from inferall.gpu.allocator import AllocationPlan
 from inferall.registry.metadata import ModelRecord
 
 logger = logging.getLogger(__name__)
 
+# Context window used when none is configured. Tool schemas plus a few turns
+# of tool results overflow 4096 quickly; 0 means "use the model's trained
+# context length" (llama-cpp-python semantics).
+DEFAULT_N_CTX = 8192
+
 
 class LlamaCppBackend(BaseBackend):
     """Backend for GGUF models via llama-cpp-python."""
+
+    def __init__(self, n_ctx: int = DEFAULT_N_CTX):
+        self.n_ctx = n_ctx
 
     @property
     def name(self) -> str:
@@ -56,6 +77,7 @@ class LlamaCppBackend(BaseBackend):
         load_kwargs = {
             "model_path": str(model_path),
             "n_gpu_layers": allocation.n_gpu_layers,
+            "n_ctx": self.n_ctx,
             "verbose": False,
         }
 
@@ -63,9 +85,6 @@ class LlamaCppBackend(BaseBackend):
         if allocation.tensor_split:
             load_kwargs["tensor_split"] = allocation.tensor_split
             logger.info("Using tensor_split: %s", allocation.tensor_split)
-
-        # Context length — default to 4096
-        load_kwargs["n_ctx"] = 4096
 
         llm = Llama(**load_kwargs)
 
@@ -77,7 +96,10 @@ class LlamaCppBackend(BaseBackend):
             vram_used_bytes=allocation.estimated_vram_bytes,
         )
 
-        logger.info("Loaded GGUF model: %s", record.model_id)
+        logger.info(
+            "Loaded GGUF model: %s (n_ctx=%s)",
+            record.model_id, self.n_ctx or "model default",
+        )
         return loaded
 
     def _find_gguf_file(self, local_path: Path) -> Path:
@@ -104,6 +126,34 @@ class LlamaCppBackend(BaseBackend):
         return gguf_files[0]
 
     # -------------------------------------------------------------------------
+    # Request building
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _build_kwargs(messages: List[dict], params: GenerationParams) -> dict:
+        """Build create_chat_completion kwargs shared by generate() and stream()."""
+        kwargs = {
+            "messages": normalize_tool_call_messages(messages),
+            "max_tokens": params.max_tokens,
+            "temperature": params.temperature,
+            "top_p": params.top_p,
+            "top_k": params.top_k,
+            "repeat_penalty": params.repetition_penalty,
+            "stop": params.stop,
+        }
+
+        # tool_choice="none": the model must not call tools, so do not even
+        # render them into the prompt.
+        if params.tools and params.tool_choice != "none":
+            kwargs["tools"] = params.tools
+            if params.tool_choice is not None:
+                kwargs["tool_choice"] = params.tool_choice
+        if params.response_format:
+            kwargs["response_format"] = params.response_format
+
+        return kwargs
+
+    # -------------------------------------------------------------------------
     # Generate (non-streaming)
     # -------------------------------------------------------------------------
 
@@ -116,48 +166,42 @@ class LlamaCppBackend(BaseBackend):
         """Generate a complete response using llama.cpp."""
         loaded.touch()
 
-        kwargs = {
-            "messages": messages,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "top_k": params.top_k,
-            "repeat_penalty": params.repetition_penalty,
-            "stop": params.stop,
-        }
-
-        if params.tools:
-            kwargs["tools"] = params.tools
-        if params.tool_choice is not None:
-            kwargs["tool_choice"] = params.tool_choice
-        if params.response_format:
-            kwargs["response_format"] = params.response_format
-
+        kwargs = self._build_kwargs(messages, params)
         response = loaded.model.create_chat_completion(**kwargs)
 
         choice = response["choices"][0]
         usage = response.get("usage", {})
         message = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "stop")
 
-        # Parse tool calls if present
+        # Reasoning models (Qwen3) think before answering or calling a tool.
+        text = strip_thinking(message.get("content") or "")
+
+        # Structured tool_calls: llama-cpp-python produces these only when
+        # tool_choice named a specific function (grammar-constrained).
         tool_calls = None
         if message.get("tool_calls"):
-            from inferall.backends.base import ToolCall
             tool_calls = [
                 ToolCall(
-                    id=tc.get("id", f"call_{i}"),
+                    id=tc.get("id") or f"call_{i}",
                     type=tc.get("type", "function"),
                     function_name=tc.get("function", {}).get("name", ""),
                     function_arguments=tc.get("function", {}).get("arguments", "{}"),
                 )
                 for i, tc in enumerate(message["tool_calls"])
             ]
+        # Otherwise the model wrote its tool call as text in its own format.
+        elif "tools" in kwargs:
+            tool_calls, text = parse_tool_calls(text)
+
+        if tool_calls:
+            finish_reason = "tool_calls"
 
         return GenerationResult(
-            text=message.get("content") or "",
+            text=text,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
-            finish_reason=choice.get("finish_reason", "stop"),
+            finish_reason=finish_reason,
             tool_calls=tool_calls,
         )
 
@@ -172,30 +216,61 @@ class LlamaCppBackend(BaseBackend):
         params: GenerationParams,
         cancel: Optional[threading.Event] = None,
     ) -> Iterator[str]:
-        """Stream tokens from llama.cpp."""
+        """
+        Stream tokens from llama.cpp.
+
+        Tools and response_format are rendered into the prompt exactly as in
+        generate(). Tool calls still arrive as text; the API layer extracts
+        them from the stream.
+        """
         loaded.touch()
 
-        stream = loaded.model.create_chat_completion(
-            messages=messages,
-            max_tokens=params.max_tokens,
-            temperature=params.temperature,
-            top_p=params.top_p,
-            top_k=params.top_k,
-            repeat_penalty=params.repetition_penalty,
-            stop=params.stop,
-            stream=True,
-        )
+        kwargs = self._build_kwargs(messages, params)
+        stream = loaded.model.create_chat_completion(stream=True, **kwargs)
+        think_filter = ThinkingStreamFilter()
+
+        # When tool_choice names a function, llama-cpp-python streams the
+        # grammar-constrained arguments as native delta.tool_calls fragments
+        # (content is None). Collect them and emit the finished call in the
+        # same text form the API layer already extracts.
+        native_calls: dict = {}
 
         for chunk in stream:
             if cancel is not None and cancel.is_set():
                 break
 
             choices = chunk.get("choices", [])
-            if choices:
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
-                    yield content
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                out = think_filter.feed(content)
+                if out:
+                    yield out
+            for frag in delta.get("tool_calls") or []:
+                idx = frag.get("index", 0)
+                entry = native_calls.setdefault(idx, {"name": "", "arguments": ""})
+                fn = frag.get("function") or {}
+                if fn.get("name"):
+                    entry["name"] = fn["name"]
+                entry["arguments"] += fn.get("arguments") or ""
+
+        tail = think_filter.flush()
+        if tail:
+            yield tail
+
+        for idx in sorted(native_calls):
+            entry = native_calls[idx]
+            try:
+                args = json.loads(entry["arguments"]) if entry["arguments"].strip() else {}
+            except json.JSONDecodeError:
+                # Cut off mid-arguments (max_tokens); pass the fragment on
+                # verbatim rather than silently dropping the call.
+                args = entry["arguments"]
+            yield (f"{TOOL_CALL_OPEN}"
+                   f"{json.dumps({'name': entry['name'], 'arguments': args})}"
+                   f"{TOOL_CALL_CLOSE}")
 
     # -------------------------------------------------------------------------
     # Unload

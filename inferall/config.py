@@ -42,6 +42,9 @@ class EngineConfig:
     api_key: Optional[str] = None
     ollama_api_key: Optional[str] = None
     trust_remote_code: bool = False
+    # Context window for GGUF models (llama.cpp). 0 = the model's trained
+    # context length. Larger values cost VRAM for the KV cache.
+    gguf_n_ctx: int = 8192
 
     def __post_init__(self):
         # Derive paths from base_dir if not explicitly set
@@ -85,6 +88,7 @@ class EngineConfig:
             "INFERALL_VRAM_BUFFER_MB": ("vram_buffer_mb", int),
             "INFERALL_MAX_LOADED": ("max_loaded_models", int),
             "INFERALL_WORKERS": ("inference_workers", int),
+            "INFERALL_GGUF_N_CTX": ("gguf_n_ctx", int),
             "INFERALL_BASE_DIR": ("base_dir", Path),
             "OLLAMA_API_KEY": ("ollama_api_key", str),
         }

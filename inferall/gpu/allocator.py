@@ -186,8 +186,9 @@ class GPUAllocator:
                 record.model_id, kv_cache / 1024**3, max_seq_len,
             )
         else:
-            # Fallback: 10% of model weights as KV cache estimate
-            kv_cache = int(model_weights * 0.10)
+            # Fallback: 10% of model weights as KV cache estimate at the
+            # 4096-token baseline, scaled with the requested context.
+            kv_cache = int(model_weights * 0.10 * (max_seq_len / 4096))
             logger.debug(
                 "No config.json for %s, using heuristic KV cache estimate",
                 record.model_id,
